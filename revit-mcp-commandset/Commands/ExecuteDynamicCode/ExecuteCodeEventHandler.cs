@@ -83,7 +83,10 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                 ReferencedAssemblies =
                 {
                     "System.dll",
-                    "System.Core.dll",
+                    "System.Core.dll", 
+                    "System.Linq.dll", //  LINQ 所需程序集
+                    "System.Collections.dll",
+                    "System.IO.dll",
                     typeof(Document).Assembly.Location,  // RevitAPI.dll
                     typeof(UIApplication).Assembly.Location // RevitAPIUI.dll
                 }
@@ -91,22 +94,24 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
 
             // 包装代码以规范入口点
             var wrappedCode = $@"
-using System;
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
-using System.Collections.Generic;
+                using System;
+                using System.Linq;
+                using System.IO;
+                using Autodesk.Revit.DB;
+                using Autodesk.Revit.UI;
+                using System.Collections.Generic;
 
-namespace AIGeneratedCode
-{{
-    public static class CodeExecutor
-    {{
-        public static object Execute(Document document, object[] parameters)
-        {{
-            // 用户代码入口
-            {code}
-        }}
-    }}
-}}";
+                namespace AIGeneratedCode
+                {{
+                    public static class CodeExecutor
+                    {{
+                        public static object Execute(Document document, object[] parameters)
+                        {{
+                            // 用户代码入口
+                            {code}
+                        }}
+                    }}
+                }}";
 
             // 编译代码
             using (var provider = new CSharpCodeProvider())
@@ -136,7 +141,7 @@ namespace AIGeneratedCode
 
         public string GetName()
         {
-            return "执行AI代码";
+            return "AI Coding";
         }
     }
 
