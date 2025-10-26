@@ -18,7 +18,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
         // 执行结果信息
         public ExecutionResultInfo ResultInfo { get; private set; }
 
-        // 状态同步对象
+        // Synchronization primitives
         public bool TaskCompleted { get; private set; }
         private readonly ManualResetEvent _resetEvent = new ManualResetEvent(false);
 
@@ -44,9 +44,12 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                 var doc = app.ActiveUIDocument.Document;
                 ResultInfo = new ExecutionResultInfo();
 
-                using (var transaction = new Transaction(doc, "执行AI代码"))
+                using (var transaction = new Transaction(doc, "Execute AI code"))
                 {
                     transaction.Start();
+                    var fho = transaction.GetFailureHandlingOptions();
+                    fho.SetFailuresPreprocessor(new DismissAllFailures());
+                    transaction.SetFailureHandlingOptions(fho);
 
                     // 动态编译执行代码
                     var result = CompileAndExecuteCode(
@@ -73,6 +76,9 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             }
         }
 
+        /// <summary>
+        /// Dynamically compiles and executes a C# code snippet in memory.
+        /// </summary>
         private object CompileAndExecuteCode(string code, Document doc, object[] parameters)
         {
             // 添加必要的程序集引用
@@ -80,11 +86,12 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             {
                 GenerateInMemory = true,
                 GenerateExecutable = false,
+                CompilerOptions = "/langversion:Default",
                 ReferencedAssemblies =
                 {
                     "System.dll",
                     "System.Core.dll", 
-                    "System.Linq.dll", //  LINQ 所需程序集
+                    "System.Linq.dll", // For LINQ 
                     "System.Collections.dll",
                     "System.IO.dll",
                     typeof(Document).Assembly.Location,  // RevitAPI.dll
@@ -92,7 +99,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                 }
             };
 
-            // 包装代码以规范入口点
+            // Wrap user code into a static method entrypoint
             var wrappedCode = $@"
                 using System;
                 using System.Linq;
@@ -100,6 +107,10 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                 using Autodesk.Revit.DB;
                 using Autodesk.Revit.UI;
                 using System.Collections.Generic;
+                using Autodesk.Revit.DB.Structure;
+                using Autodesk.Revit.DB.Plumbing;
+                using Autodesk.Revit.DB.Mechanical;
+                using Autodesk.Revit.DB.Electrical;
 
                 namespace AIGeneratedCode
                 {{
@@ -121,7 +132,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                     wrappedCode
                 );
 
-                // 处理编译结果
+                // Handle compilation errors
                 if (compileResults.Errors.HasErrors)
                 {
                     var errors = string.Join("\n", compileResults.Errors
@@ -130,7 +141,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                     throw new Exception($"代码编译错误:\n{errors}");
                 }
 
-                // 反射调用执行方法
+                // Execute compiled method via reflection
                 var assembly = compileResults.CompiledAssembly;
                 var executorType = assembly.GetType("AIGeneratedCode.CodeExecutor");
                 var executeMethod = executorType.GetMethod("Execute");
@@ -138,11 +149,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                 return executeMethod.Invoke(null, new object[] { doc, parameters });
             }
         }
-
-        public string GetName()
-        {
-            return "AI Coding";
-        }
+        public string GetName() => "AI Dynamic Code Executor";
     }
 
     // 执行结果数据结构
@@ -156,5 +163,26 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
 
         [JsonProperty("errorMessage")]
         public string ErrorMessage { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Suppresses all warnings (FailureSeverity.Warning) during Revit transactions.
+    /// Prevents modal dialogs from interrupting external automation.
+    /// </summary>
+    internal class DismissAllFailures : IFailuresPreprocessor
+    {
+        public FailureProcessingResult PreprocessFailures(FailuresAccessor accessor)
+        {
+            IList<FailureMessageAccessor> failList = accessor.GetFailureMessages();
+
+            foreach (var fma in failList)
+            {
+                FailureSeverity severity = fma.GetSeverity();
+
+                if (severity == FailureSeverity.Warning)
+                    accessor.DeleteWarning(fma);
+            }
+            return FailureProcessingResult.Continue;
+        }
     }
 }
