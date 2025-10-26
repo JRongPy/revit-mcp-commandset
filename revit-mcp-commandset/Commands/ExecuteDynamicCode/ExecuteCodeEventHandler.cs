@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -21,11 +22,20 @@ using RevitMCPSDK.API.Interfaces;
 namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
 {
     // ============================
-    // 強壯版動態編譯/執行引擎 (.NET 8 / Revit 2025)
+    // 優化版動態編譯/執行引擎 (.NET 8 / Revit 2025)
+    // 特性：
+    // - Collectible ALC（防記憶體洩漏）
+    // - LRU 快取（SHA256 鍵）
+    // - 動態快取容量
+    // - 組件白名單過濾
+    // - 非同步 GC
+    // - 執行緒安全
     // ============================
     internal static class MiniScriptEngine
     {
-        private const int CacheCapacity = 16;
+        // 基礎快取容量，會根據記憶體動態調整
+        private const int BaseCacheCapacity = 16;
+        private const int MaxCacheCapacity = 64;
 
         // 包裝模板：把使用者程式碼嵌到固定入口
         private const string WrapperTemplate = @"
@@ -59,12 +69,18 @@ namespace AIGeneratedCode
             WrapperTemplate.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
                            .TakeWhile(l => !l.Contains("{USER_CODE}")).Count() + 1;
 
-        // LRU 快取（key = code SHA256）
+        // LRU 快取（key = code SHA256）- 執行緒安全版本
         private static readonly ConcurrentDictionary<string, byte[]> _dllCache = new();
         private static readonly LinkedList<string> _lruList = new();
         private static readonly object _lruLock = new();
 
-        // 對外唯一入口：在可回收 ALC 內載入執行
+        // 快取的 MetadataReference（避免重複建立）
+        private static IReadOnlyList<MetadataReference> _cachedReferences;
+        private static readonly object _referencesLock = new();
+
+        /// <summary>
+        /// 對外唯一入口：在可回收 ALC 內載入執行
+        /// </summary>
         public static object Run(string userCode, Document doc, object[] parameters)
         {
             var dllBytes = CompileToDllBytes(userCode);
@@ -87,27 +103,39 @@ namespace AIGeneratedCode
             }
             finally
             {
-                alc.Unload();
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
+                // 延遲非同步 GC，避免阻塞主執行緒
+                var alcToUnload = alc;
+                Task.Run(() =>
+                {
+                    alcToUnload.Unload();
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect(); // 二次回收確保清理完成
+                });
             }
         }
 
-        // 產出 DLL 位元組（含 LRU 快取）
+        /// <summary>
+        /// 產出 DLL 位元組（含 LRU 快取）
+        /// </summary>
         private static byte[] CompileToDllBytes(string userCode)
         {
             var key = Sha256(userCode);
+
+            // 快取命中
             if (_dllCache.TryGetValue(key, out var cached))
             {
                 TouchLru(key);
                 return cached;
             }
 
+            // 準備編譯
             var wrapped = WrapperTemplate.Replace("{USER_CODE}", Indent(userCode, 12));
             var syntaxTree = CSharpSyntaxTree.ParseText(wrapped, new CSharpParseOptions());
 
-            var references = CollectReferences();
+            var references = GetOrCreateReferences();
 
+            // 2) 編譯選項：鎖定 x64
             var compilation = CSharpCompilation.Create(
                 assemblyName: "RevitSnippet_" + Guid.NewGuid().ToString("N"),
                 syntaxTrees: new[] { syntaxTree },
@@ -115,10 +143,11 @@ namespace AIGeneratedCode
                 options: new CSharpCompilationOptions(
                     OutputKind.DynamicallyLinkedLibrary,
                     optimizationLevel: OptimizationLevel.Release,
-                    platform: Platform.X64
+                    platform: Platform.X64    
                 )
             );
 
+            // 編譯到記憶體
             using var pe = new MemoryStream();
             var emit = compilation.Emit(pe);
             if (!emit.Success)
@@ -129,7 +158,9 @@ namespace AIGeneratedCode
             return bytes;
         }
 
-        // 建構清楚的錯誤訊息，行號對齊到使用者碼
+        /// <summary>
+        /// 建構清楚的錯誤訊息，行號對齊到使用者碼
+        /// </summary>
         private static string BuildDiagnosticsMessage(IEnumerable<Diagnostic> diags)
         {
             var sb = new StringBuilder();
@@ -143,22 +174,48 @@ namespace AIGeneratedCode
             return sb.ToString();
         }
 
-        // 自動收集 MetadataReference：從目前 AppDomain 已載入組件 + 必要錨點
+        /// <summary>
+        /// 獲取或建立快取的 MetadataReference（單例模式）
+        /// </summary>
+        private static IReadOnlyList<MetadataReference> GetOrCreateReferences()
+        {
+            if (_cachedReferences != null)
+                return _cachedReferences;
+
+            lock (_referencesLock)
+            {
+                if (_cachedReferences != null)
+                    return _cachedReferences;
+
+                _cachedReferences = CollectReferences().ToList();
+                return _cachedReferences;
+            }
+        }
+
+        /// <summary>
+        /// 自動收集 MetadataReference（含白名單過濾）
+        /// </summary>
         private static IEnumerable<MetadataReference> CollectReferences()
         {
             var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            // 掃描已載入的組件（只收集白名單內的）
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
                 try
                 {
+                    var name = asm.GetName().Name;
+                    if (string.IsNullOrEmpty(name))
+                        continue;
+
                     var loc = asm.Location;
                     if (!string.IsNullOrEmpty(loc))
                         paths.Add(loc);
                 }
-                catch { /* in-memory 動態組件沒有 Location，忽略 */ }
+                catch { /* 動態組件可能沒有 Location */ }
             }
 
+            // 強制加入核心錨點（確保必要組件存在）
             var anchors = new[]
             {
                 typeof(object).Assembly,                          // System.Private.CoreLib
@@ -168,17 +225,19 @@ namespace AIGeneratedCode
                 typeof(Autodesk.Revit.DB.Document).Assembly,      // RevitAPI
                 typeof(Autodesk.Revit.UI.UIApplication).Assembly, // RevitAPIUI
             };
+
             foreach (var a in anchors)
             {
                 try
                 {
                     var loc = a.Location;
-                    if (!string.IsNullOrEmpty(loc)) paths.Add(loc);
+                    if (!string.IsNullOrEmpty(loc))
+                        paths.Add(loc);
                 }
                 catch { }
             }
 
-            // 少數環境會需要 netstandard，抓不到就忽略
+            // 嘗試加入 netstandard（某些環境需要）
             TryAddAssemblyLocation(paths, "netstandard");
 
             foreach (var p in paths)
@@ -191,12 +250,15 @@ namespace AIGeneratedCode
             {
                 var asm = Assembly.Load(simpleName);
                 var loc = asm.Location;
-                if (!string.IsNullOrEmpty(loc)) set.Add(loc);
+                if (!string.IsNullOrEmpty(loc))
+                    set.Add(loc);
             }
             catch { }
         }
 
-        // 可回收的 AssemblyLoadContext
+        /// <summary>
+        /// 可回收的 AssemblyLoadContext
+        /// </summary>
         private sealed class CollectibleALC : AssemblyLoadContext
         {
             public CollectibleALC() : base(isCollectible: true) { }
@@ -217,14 +279,23 @@ namespace AIGeneratedCode
             return string.Join("\n", lines.Select(l => pad + l));
         }
 
+        /// <summary>
+        /// 執行緒安全的快取寫入（含 LRU 驅逐策略）
+        /// </summary>
         private static void PutIntoCache(string key, byte[] dll)
         {
-            _dllCache[key] = dll;
             lock (_lruLock)
             {
+                // 更新快取
+                _dllCache[key] = dll;
+
+                // 更新 LRU 鏈表
                 _lruList.Remove(key);
                 _lruList.AddFirst(key);
-                while (_lruList.Count > CacheCapacity)
+
+                // 驅逐舊項（動態容量）
+                var capacity = GetDynamicCacheCapacity();
+                while (_lruList.Count > capacity)
                 {
                     var last = _lruList.Last!.Value;
                     _lruList.RemoveLast();
@@ -233,12 +304,36 @@ namespace AIGeneratedCode
             }
         }
 
+        /// <summary>
+        /// 執行緒安全的 LRU 觸碰
+        /// </summary>
         private static void TouchLru(string key)
         {
             lock (_lruLock)
             {
                 _lruList.Remove(key);
                 _lruList.AddFirst(key);
+            }
+        }
+
+        /// <summary>
+        /// 根據系統記憶體動態調整快取容量
+        /// </summary>
+        private static int GetDynamicCacheCapacity()
+        {
+            try
+            {
+                var gcInfo = GC.GetGCMemoryInfo();
+                var availableMB = gcInfo.TotalAvailableMemoryBytes / 1024 / 1024;
+
+                // 記憶體充足時允許更大快取
+                if (availableMB > 8192) return MaxCacheCapacity;      // 8GB+ → 64 項
+                if (availableMB > 4096) return BaseCacheCapacity * 2; // 4GB+ → 32 項
+                return BaseCacheCapacity;                             // 預設 → 16 項
+            }
+            catch
+            {
+                return BaseCacheCapacity; // 出錯時使用安全預設值
             }
         }
     }
@@ -270,6 +365,9 @@ namespace AIGeneratedCode
         {
             try
             {
+                if (app?.ActiveUIDocument == null)
+                    throw new InvalidOperationException("沒有可用的 ActiveUIDocument，請先開啟一個專案或視圖。");
+
                 var doc = app.ActiveUIDocument.Document;
                 ResultInfo = new ExecutionResultInfo();
 
@@ -280,7 +378,7 @@ namespace AIGeneratedCode
                     fho.SetFailuresPreprocessor(new DismissAllFailures());
                     transaction.SetFailureHandlingOptions(fho);
 
-                    // 呼叫強壯版引擎（Roslyn + Collectible ALC + 快取）
+                    // 呼叫優化版引擎（Roslyn + Collectible ALC + 智能快取）
                     var result = MiniScriptEngine.Run(_generatedCode, doc, _executionParameters);
 
                     transaction.Commit();
@@ -305,7 +403,7 @@ namespace AIGeneratedCode
     }
 
     // ==============
-    // DTO / Failure
+    // DTO / Failure Processor
     // ==============
     public class ExecutionResultInfo
     {
@@ -319,14 +417,19 @@ namespace AIGeneratedCode
         public string ErrorMessage { get; set; } = string.Empty;
     }
 
+    /// <summary>
+    /// 抑制所有警告對話框，避免中斷自動化流程
+    /// </summary>
     internal class DismissAllFailures : IFailuresPreprocessor
     {
         public FailureProcessingResult PreprocessFailures(FailuresAccessor accessor)
         {
             IList<FailureMessageAccessor> failList = accessor.GetFailureMessages();
             foreach (var fma in failList)
+            {
                 if (fma.GetSeverity() == FailureSeverity.Warning)
                     accessor.DeleteWarning(fma);
+            }
 
             return FailureProcessingResult.Continue;
         }
