@@ -1,28 +1,37 @@
-﻿using System.CodeDom.Compiler;
+﻿using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.Loader;
+using System.Threading;
+using System.Collections.Generic;
+using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
-using Microsoft.CSharp;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Emit;
 using Newtonsoft.Json;
 using RevitMCPSDK.API.Interfaces;
 
 namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
 {
     /// <summary>
-    /// 处理代码执行的外部事件处理器
+    /// 處理代碼執行的外部事件處理器 (Revit 2025 / .NET 8)
     /// </summary>
     public class ExecuteCodeEventHandler : IExternalEventHandler, IWaitableExternalEventHandler
     {
-        // 代码执行参数
+        // 代碼執行參數
         private string _generatedCode;
         private object[] _executionParameters;
 
-        // 执行结果信息
+        // 執行結果信息
         public ExecutionResultInfo ResultInfo { get; private set; }
 
         // Synchronization primitives
         public bool TaskCompleted { get; private set; }
         private readonly ManualResetEvent _resetEvent = new ManualResetEvent(false);
 
-        // 设置要执行的代码和参数
+        // 設置要執行的代碼和參數
         public void SetExecutionParameters(string code, object[] parameters = null)
         {
             _generatedCode = code;
@@ -31,7 +40,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             _resetEvent.Reset();
         }
 
-        // 等待执行完成 - IWaitableExternalEventHandler接口实现
+        // 等待執行完成 - IWaitableExternalEventHandler接口實現
         public bool WaitForCompletion(int timeoutMilliseconds = 10000)
         {
             return _resetEvent.WaitOne(timeoutMilliseconds);
@@ -51,7 +60,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                     fho.SetFailuresPreprocessor(new DismissAllFailures());
                     transaction.SetFailureHandlingOptions(fho);
 
-                    // 动态编译执行代码
+                    // 動態編譯執行代碼 (使用 Roslyn)
                     var result = CompileAndExecuteCode(
                         code: _generatedCode,
                         doc: doc,
@@ -67,7 +76,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             catch (Exception ex)
             {
                 ResultInfo.Success = false;
-                ResultInfo.ErrorMessage = $"执行失败: {ex.Message}";
+                ResultInfo.ErrorMessage = $"執行失敗: {ex.Message}\n{ex.StackTrace}";
             }
             finally
             {
@@ -77,36 +86,18 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
         }
 
         /// <summary>
-        /// Dynamically compiles and executes a C# code snippet in memory.
+        /// 使用 Roslyn 動態編譯並執行 C# 代碼片段
         /// </summary>
         private object CompileAndExecuteCode(string code, Document doc, object[] parameters)
         {
-            // 添加必要的程序集引用
-            var compilerParams = new CompilerParameters
-            {
-                GenerateInMemory = true,
-                GenerateExecutable = false,
-                CompilerOptions = "/langversion:Default",
-                ReferencedAssemblies =
-                {
-                    "System.dll",
-                    "System.Core.dll", 
-                    "System.Linq.dll", // For LINQ 
-                    "System.Collections.dll",
-                    "System.IO.dll",
-                    typeof(Document).Assembly.Location,  // RevitAPI.dll
-                    typeof(UIApplication).Assembly.Location // RevitAPIUI.dll
-                }
-            };
-
-            // Wrap user code into a static method entrypoint
+            // 包裝用戶代碼為靜態方法
             var wrappedCode = $@"
                 using System;
                 using System.Linq;
                 using System.IO;
+                using System.Collections.Generic;
                 using Autodesk.Revit.DB;
                 using Autodesk.Revit.UI;
-                using System.Collections.Generic;
                 using Autodesk.Revit.DB.Structure;
                 using Autodesk.Revit.DB.Plumbing;
                 using Autodesk.Revit.DB.Mechanical;
@@ -116,43 +107,74 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                 {{
                     public static class CodeExecutor
                     {{
-                        public static object Execute(Document document, object[] parameters)
+                        public static object Execute(Autodesk.Revit.DB.Document document, object[] parameters)
                         {{
-                            // 用户代码入口
+                            // 用戶代碼入口
                             {code}
                         }}
                     }}
                 }}";
 
-            // 编译代码
-            using (var provider = new CSharpCodeProvider())
+            // 使用 Roslyn 解析語法樹
+            var syntaxTree = CSharpSyntaxTree.ParseText(wrappedCode);
+
+            // 收集必要的程序集引用
+            var references = new List<MetadataReference>
             {
-                var compileResults = provider.CompileAssemblyFromSource(
-                    compilerParams,
-                    wrappedCode
-                );
+                // 基礎 .NET 程序集
+                MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(Console).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location),
+                
+                // Revit API 程序集
+                MetadataReference.CreateFromFile(typeof(Document).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(UIApplication).Assembly.Location),
+                
+                // .NET 運行時程序集
+                MetadataReference.CreateFromFile(Assembly.Load("System.Runtime").Location),
+                MetadataReference.CreateFromFile(Assembly.Load("System.Collections").Location),
+                MetadataReference.CreateFromFile(Assembly.Load("System.Linq").Location),
+                MetadataReference.CreateFromFile(Assembly.Load("netstandard").Location)
+            };
 
-                // Handle compilation errors
-                if (compileResults.Errors.HasErrors)
-                {
-                    var errors = string.Join("\n", compileResults.Errors
-                        .Cast<CompilerError>()
-                        .Select(e => $"Line {e.Line}: {e.ErrorText}"));
-                    throw new Exception($"代码编译错误:\n{errors}");
-                }
+            // 創建編譯選項
+            var compilation = CSharpCompilation.Create(
+                assemblyName: $"DynamicAssembly_{Guid.NewGuid():N}",
+                syntaxTrees: new[] { syntaxTree },
+                references: references,
+                options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            );
 
-                // Execute compiled method via reflection
-                var assembly = compileResults.CompiledAssembly;
-                var executorType = assembly.GetType("AIGeneratedCode.CodeExecutor");
-                var executeMethod = executorType.GetMethod("Execute");
+            // 編譯到記憶體流
+            using var ms = new MemoryStream();
+            EmitResult emitResult = compilation.Emit(ms);
 
-                return executeMethod.Invoke(null, new object[] { doc, parameters });
+            // 處理編譯錯誤
+            if (!emitResult.Success)
+            {
+                var errors = string.Join("\n", emitResult.Diagnostics
+                    .Where(d => d.Severity == DiagnosticSeverity.Error)
+                    .Select(d =>
+                    {
+                        var lineSpan = d.Location.GetLineSpan();
+                        return $"Line {lineSpan.StartLinePosition.Line + 1}: {d.GetMessage()}";
+                    }));
+                throw new Exception($"代碼編譯錯誤:\n{errors}");
             }
+
+            // 載入編譯後的程序集並執行
+            ms.Seek(0, SeekOrigin.Begin);
+            var assembly = AssemblyLoadContext.Default.LoadFromStream(ms);
+            var executorType = assembly.GetType("AIGeneratedCode.CodeExecutor");
+            var executeMethod = executorType.GetMethod("Execute");
+
+            return executeMethod.Invoke(null, new object[] { doc, parameters });
         }
+
         public string GetName() => "AI Dynamic Code Executor";
     }
 
-    // 执行结果数据结构
+    // 執行結果數據結構
     public class ExecutionResultInfo
     {
         [JsonProperty("success")]
@@ -166,8 +188,8 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
     }
 
     /// <summary>
-    /// Suppresses all warnings (FailureSeverity.Warning) during Revit transactions.
-    /// Prevents modal dialogs from interrupting external automation.
+    /// 抑制所有警告 (FailureSeverity.Warning)
+    /// 防止模態對話框中斷外部自動化
     /// </summary>
     internal class DismissAllFailures : IFailuresPreprocessor
     {
