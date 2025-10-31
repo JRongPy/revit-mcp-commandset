@@ -36,7 +36,7 @@ namespace RevitMCPCommandSet.Services.Routing
         {
             var cons = GetPipeConnectors(pipe).ToList();
             if (cons.Count != 2) return null;
-            return cons[0].Id == knownEnd?.Id ? cons[1] : cons[0];
+            return cons[0].Origin.DistanceTo(knownEnd.Origin)==0 ? cons[1] : cons[0];
         }
 
         public static Connector GetSingleFreeEndConnector(Pipe p)

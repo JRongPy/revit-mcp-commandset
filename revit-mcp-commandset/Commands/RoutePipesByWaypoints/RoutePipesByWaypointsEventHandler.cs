@@ -75,25 +75,64 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                 var ctx = InferRoutingContext(_doc, startEle, endEle, _task);
                 WriteLog($"[CONTEXT] SystemTypeId={ctx.SystemTypeId.IntegerValue}, PipeTypeId={ctx.PipeTypeId.IntegerValue}, LevelId={ctx.LevelId.IntegerValue}, Diameter={ctx.Diameter_ft * 304.8:F1} mm");
 
-                // 4) 解析 attach point
-                var startAttach = ResolveAttachPoint(_doc, startEle, _task, isStart: true, ctx);
-                var endAttach = ResolveAttachPoint(_doc, endEle, _task, isStart: false, ctx);
-                WriteLog($"StartAttach: {startAttach.AnchorPoint}, EndAttach: {endAttach.AnchorPoint}");
-
-                // 5) 組合路徑
-                var path = BuildPathWorldPoints(startAttach.AnchorPoint, _task.Waypoints, endAttach.AnchorPoint);
-                WriteLog($"Path Points: {string.Join(" -> ", path.Select(p => p.ToString()))}");
-
-                // 6) 實際建模
                 using (var t = new Transaction(_doc, "Route Pipes by Waypoints"))
                 {
                     t.Start();
-                    var segCreated = CreateSegmentsAndFittings(
-                        _doc, ctx, startAttach, endAttach, path,
-                        _task.MinSegmentLength_mm / 304.8,
-                        _task.RoutingPreference, _task.Tolerance_mm / 304.8
-                    );
-                    created.AddRange(segCreated.Select(id => id.IntegerValue));
+                    // 4) 解析 attach point
+                    var startAttach = ResolveAttachPoint(_doc, startEle, _task, isStart: true, ctx);
+                    var endAttach = ResolveAttachPoint(_doc, endEle, _task, isStart: false, ctx);
+                    WriteLog($"StartAttach: {startAttach.AnchorPoint}, EndAttach: {endAttach.AnchorPoint}");
+
+                    // 5) 組合路徑
+                    var path = BuildPathWorldPoints(startAttach.AnchorPoint, _task.Waypoints, endAttach.AnchorPoint);
+                    WriteLog($"Path Points: {string.Join(" -> ", path.Select(p => p.ToString()))}");
+
+                    // 在逐段建模前，先把首/尾 waypoint 若與端點方向平行者整併掉
+                    NormalizeMidsByEndpointDirection(startAttach, endAttach, path, angTolDeg: 5.0);
+                    WriteLog($"[CreateSegments][NormalizedPts] path point count: {path.Count}");
+                    
+                    //重新整理connector狀態
+                    startAttach.RefreshConnector();
+                    endAttach.RefreshConnector();
+                    
+                    // 6) 實際建模
+                    if (path.Count == 1)
+                    {
+                        // 罕見：normalize 後只剩一點（起訖重合或都被吸收）
+                        WriteLog("[CreateSegments] path.Count == 1 → 嘗試直接以接頭連接");
+                        try 
+                        {
+                            _doc.Create.NewElbowFitting(
+                                startAttach.Connector,
+                                endAttach.Connector
+                            );
+                        }
+                        catch(Exception ex)
+                        {
+                            WriteLog($"[CreateSegments] [ERROR] {ex}");
+                        }
+                    }
+                    else if (path.Count == 2)
+                    {
+                        // 最常見：單段直連
+
+                        WriteLog($"[CreateSegments] path.Count == 2 → 直連 {Pt(path[0])} -> {Pt(path[1])}");
+                        var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(
+                            _doc, ctx, startAttach.Connector, path[0], path[1],
+                            _task.MinSegmentLength_mm / 304.8, _task.Tolerance_mm / 304.8, new List<ElementId>() // 先建段
+                        );
+                        var lastConn = SegmentBuilder.GetFarEndConnector(segId, startAttach.Connector);                          
+                        SegmentBuilder.ConnectToTargetEnd(_doc, ctx, lastConn, endAttach, new List<ElementId>(), _task.Tolerance_mm / 304.8);
+                    }
+                    else
+                    {
+                        var segCreated = CreateSegmentsAndFittings(
+                             _doc, ctx, startAttach, endAttach, path,
+                             _task.MinSegmentLength_mm / 304.8,
+                             _task.RoutingPreference, _task.Tolerance_mm / 304.8
+                         );
+                        created.AddRange(segCreated.Select(id => id.IntegerValue));
+                    }
                     t.Commit();
                 }
 
