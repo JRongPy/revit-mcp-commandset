@@ -112,13 +112,13 @@ namespace RevitMCPCommandSet.Services.Routing
 
         public static void ConnectToTargetEnd(
             Document doc, RoutingContext ctx, Connector lastConnector,
-            RoutingServices.AttachPoint end, List<ElementId> acc, double tol_ft)
+            RoutingAnchor end, List<ElementId> acc, double tol_ft)
         {
-            if (end.Connector != null)
+            if (end.AnchorConnector != null)
             {
                 // 與終點connector距離遠 → 補一小段再用彎頭連接；近 → 直接彎頭
                 var near = lastConnector;
-                var far = end.Connector;
+                var far = end.AnchorConnector;
 
                 if (near.Origin.DistanceTo(far.Origin) > tol_ft)
                 {

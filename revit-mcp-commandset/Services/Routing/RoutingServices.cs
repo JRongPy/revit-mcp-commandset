@@ -163,7 +163,7 @@ namespace RevitMCPCommandSet.Services.Routing
         // --- Step4: 解析 AttachPoint（含：就近 connector？或管上投影+Tee/Takeoff）
         public static AttachPoint ResolveAttachPoint(Document doc, Element host, RouteTask task, bool isStart, RoutingContext ctx)
         {
-            WriteLog($"[ResolveAttach][IN] Host={host?.Id.IntegerValue}, Kind={Classify(host)}, isStart={isStart}");
+            WriteLog($"[ResolveAttach][IN] Host={host?.Id}, Kind={Classify(host)}, isStart={isStart}");
             var kind = Classify(host);
 
             try
@@ -174,7 +174,7 @@ namespace RevitMCPCommandSet.Services.Routing
                     var target = wpt == null ? GetOrigin(host) : new XYZ(wpt.X / 304.8, wpt.Y / 304.8, wpt.Z / 304.8);
 
                     var nearest = ConnectorUtils.FindNearestConnector((FamilyInstance)host, target);
-                    if (nearest == null) throw new InvalidOperationException($"找不到 {host.Id.IntegerValue} 的接點");
+                    if (nearest == null) throw new InvalidOperationException($"找不到 {host.Id} 的接點");
 
                     var ap = new AttachPoint { Connector = nearest, AnchorPoint = nearest.Origin, HostElement = host, Kind = kind };
                     WriteLog($"[ResolveAttach][FI] Conn@{Pt(nearest.Origin)}");
@@ -210,7 +210,7 @@ namespace RevitMCPCommandSet.Services.Routing
                     if (!doc.IsModifiable)
                         WriteLog("[ResolveAttach][WARN] CreateBranchAt called when doc not modifiable (ensure transaction started before calling).");
 
-                    var branch = FittingPlacer.CreateBranchAt(doc, ctx, pipe, projPt, isStart, "Tee");
+                    var branch = FittingPlacer.CreateBranchAt(doc, ctx, pipe, projPt, p, "Tee");
                     var ap2 = new AttachPoint { Connector = ConnectorUtils.GetSingleFreeEndConnector(branch), AnchorPoint = ConnectorUtils.GetFreeEndPoint(branch), HostElement = branch, Kind = ElementKind.Pipe };
                     WriteLog($"[ResolveAttach][Pipe] BranchCreated BranchId={branch?.Id.IntegerValue}, Anchor={Pt(ap2.AnchorPoint)}");
                     return ap2;
@@ -239,12 +239,12 @@ namespace RevitMCPCommandSet.Services.Routing
 
         // --- Step6: 逐段建模與接頭
         public static IList<ElementId> CreateSegmentsAndFittings(
-            Document doc, RoutingContext ctx, AttachPoint start, AttachPoint end,
+            Document doc, RoutingContext ctx, RoutingAnchor start, RoutingAnchor end,
             List<XYZ> pathPts, double minSegmentLen_ft, string routingPref, double tol_ft)
         {
             WriteLog($"[CreateSegments][IN] pts={pathPts?.Count ?? 0}, minLen={minSegmentLen_ft * 304.8:F1}mm, pref={routingPref}, tol={tol_ft * 304.8:F1}mm");
             var created = new List<ElementId>();
-            var currentConnector = start.Connector;
+            var currentConnector = start.AnchorConnector;
 
             try
             {
@@ -414,85 +414,83 @@ namespace RevitMCPCommandSet.Services.Routing
             => (p.Location as LocationCurve).Curve.GetEndPoint(isStart ? 0 : 1);
 
         public static double ToMM(double ft) => ft * 304.8;
-      
 
-        /// <summary>
-        /// 若起/終點為 Pipe，且第一/最後一個中繼點（waypoint）與端點 connector 方向近似同向，
-        /// 則把該 waypoint 吸收為新的 AnchorPoint，並從 pathPts 中移除，避免後續再特判。
-        /// </summary>
-        public static void NormalizeMidsByEndpointDirection(
-            AttachPoint start, AttachPoint end, List<XYZ> pathPts,
-            double angTolDeg, double tol_ft=0.001)
+
+        // 路徑正規化：去重、去超短段、去共線中繼點；若全都重合 → 留單點
+        public static List<XYZ> NormalizePathPoints(List<XYZ> pts, double tol_ft, double angTolDeg)
         {
-            if (pathPts == null || pathPts.Count < 3) return; // 至少要有 start, mid, end
+            if (pts == null || pts.Count == 0) return new List<XYZ>();
 
-            // 角度/距離門檻
-            double minSpan = Math.Max(tol_ft * 2.0, 1e-4);
-            double angTol = Deg2Rad(angTolDeg);
-
-            // ---------- 起點側：若起點為 Pipe，且第一個 mid 與起點方向同向，吸收該 mid ----------
-            if (start?.Kind == ElementKind.Pipe && start.Connector != null)
+            // 1) 連續重複點壓縮（依距離閾值）
+            var dedup = new List<XYZ>();
+            foreach (var p in pts)
             {
-                var firstMid = pathPts[1];                 // pathPts[0] 是 start.AnchorPoint
-                var v = firstMid - start.AnchorPoint;
+                if (dedup.Count == 0 || !NearlyEqual(dedup[^1], p, tol_ft))
+                    dedup.Add(p);
+            }
+            // 若最後一點和第一點也重合，但只有兩點，保留一點
+            if (dedup.Count == 2 && NearlyEqual(dedup[0], dedup[1], tol_ft))
+                dedup = new List<XYZ> { dedup[0] };
 
-                if (v.GetLength() >= minSpan)
-                {
-                    var d = start.Connector.CoordinateSystem.BasisZ;
-                    if (!d.IsZeroLength())
-                    {
-                        double ang = AngleBetween(d, v);   // 同向
-                        if (ang <= angTol)
-                        {
-                            WriteLog($"[Normalize][Start] absorb mid {Pt(firstMid)} as new start.AnchorPoint");
-                            // 吸收：把起點 AnchorPoint 前推到 firstMid，並移除該 mid
-                            start.AnchorPoint = firstMid;
-                            start.Connector.Origin = firstMid;
-                            pathPts.RemoveAt(0);
-                        }
-                    }
-                }
+            // 2) 如果全部點都重合，直接回傳單點
+            if (AllNearEqual(dedup, dedup[0], tol_ft))
+                return new List<XYZ> { dedup[0] };
+
+            // 3) 移除很短的段（把造成 0 長度的中繼點清掉）
+            var shortClean = new List<XYZ> { dedup[0] };
+            for (int i = 1; i < dedup.Count; i++)
+            {
+                if (!NearlyEqual(shortClean[^1], dedup[i], tol_ft))
+                    shortClean.Add(dedup[i]);
             }
 
-            // ---------- 終點側：若終點為 Pipe，且最後一個 mid 與終點方向同向，吸收該 mid ----------
-            // 注意：pathPts 可能已在上面移除第一個 mid，所以重新取末端 index
-            if (end?.Kind == ElementKind.Pipe && end.Connector != null)
-            {
-                int lastMidIdx = pathPts.Count - 2;
-                var lastMid = pathPts[lastMidIdx];
-                var v = lastMid - end.AnchorPoint;
+            if (shortClean.Count <= 2) return shortClean;
 
-                if (v.GetLength() >= minSpan)
+            // 4) 移除共線中繼點（夾角小於角度容忍；含反向）
+            double cosTol = Math.Cos(angTolDeg * Math.PI / 180.0);
+            var result = new List<XYZ> { shortClean[0] };
+            for (int i = 1; i < shortClean.Count - 1; i++)
+            {
+                var a = result[^1];
+                var b = shortClean[i];
+                var c = shortClean[i + 1];
+
+                var v1 = (b - a);
+                var v2 = (c - b);
+                if (IsZero(v1, tol_ft) || IsZero(v2, tol_ft))
                 {
-                    var d = end.Connector.CoordinateSystem.BasisZ;
-                    if (!d.IsZeroLength())
-                    {
-                        double ang = AngleBetween(d, v);   // 同向（因為我們會從終點往外拉到 lastMid）
-                        if (ang <= angTol)
-                        {
-                            WriteLog($"[Normalize][End] absorb mid {Pt(lastMid)} as new end.AnchorPoint");
-                            // 吸收：把終點 AnchorPoint 前推到 lastMid，並移除該 mid
-                            end.AnchorPoint = lastMid;
-                            end.Connector.Origin = lastMid;
-                            pathPts.RemoveAt(lastMidIdx+1);
-                        }
-                    }
+                    // 有 0 長度向量，b 直接丟掉
+                    continue;
                 }
+
+                var n1 = v1.Normalize();
+                var n2 = v2.Normalize();
+                var dot = Math.Abs(n1.DotProduct(n2)); // 取絕對值：0° 或 180° 都視為同一直線
+                if (dot >= cosTol)
+                {
+                    // a-b-c 幾乎共線，b 為冗點 → 丟掉
+                    continue;
+                }
+
+                result.Add(b);
+            }
+            result.Add(shortClean[^1]);
+
+            // 5) 如果處理完只剩 1 點或 2 點即已充分；2 點相等再壓成 1 點
+            if (result.Count == 2 && NearlyEqual(result[0], result[1], tol_ft))
+                return new List<XYZ> { result[0] };
+
+            return result;
+
+            // ==== helpers ====
+            static bool NearlyEqual(XYZ p1, XYZ p2, double tol) => p1.DistanceTo(p2) <= tol;
+            static bool IsZero(XYZ v, double tol) => v.GetLength() <= tol * 0.5; // 更嚴一點避免浮點誤差累積
+            static bool AllNearEqual(List<XYZ> list, XYZ refPt, double tol)
+            {
+                foreach (var p in list)
+                    if (p.DistanceTo(refPt) > tol) return false;
+                return true;
             }
         }
-
-        private static double AngleBetween(XYZ a, XYZ b)
-        {
-            if (a == null || b == null) return Math.PI;
-            if (a.IsZeroLength() || b.IsZeroLength()) return Math.PI;
-
-            var a1 = a.Normalize();
-            var b1 = b.Normalize();
-            double dot = a1.DotProduct(b1);
-            dot = Math.Max(-1.0, Math.Min(1.0, dot));
-            return Math.Acos(dot);
-        }
-        private static double Deg2Rad(double d) => d * Math.PI / 180.0;
-
     }
 }

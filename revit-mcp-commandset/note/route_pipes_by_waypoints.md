@@ -26,3 +26,29 @@ RevitMCPCommandSet/
 │ 
 ```
 
+整體計畫說明
+1.解析起訖物件
+2.型別檢查
+3.取得配管資料集
+
+---transaction前---
+4.建立 attach 物件
+前處理機制將 attach 物件正規化
+目標：將各種原始狀況轉換為 Pipe 端點連接的形式，
+建構 attach 物件為： Pipe connector 起始 且 con dir != conn.Origin to target point() 
+
+以下幾種狀況
+1. Pipe 端點連接
+	- con dir == conn.Origin to target point
+	- con dir != conn.Origin to target point(目標型態)
+2) FamilyInstance
+	-	con dir == conn.Origin to target point
+	- 	con dir != conn.Origin to target point
+
+3) Pipe 中段連接
+	- Takeoff
+	- Tee
+	- 靠近端點(嘗試退化為端點連接，如果Pipe鄰近的connector 不是free 則放棄連接，只生成管段，並給予提示回饋)
+
+5.組合路徑
+6.實際建模

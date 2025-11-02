@@ -52,12 +52,12 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                     Waypoints = new List<JZPoint> {
                         new JZPoint(
                             x:10*304.8,
-                            y:2.5*304.8,
-                            z:1*304.8
+                            y:30*304.8,
+                            z:pStart.Z*304.8
                         )
                     },
                     MinSegmentLength_mm = 1000,
-                    RoutingPreference = "Takeoff",
+                    RoutingPreference = "Tee",
                     Tolerance_mm = 10
                 };                     
 

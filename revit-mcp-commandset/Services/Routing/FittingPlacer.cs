@@ -18,7 +18,7 @@ namespace RevitMCPCommandSet.Services.Routing
         /// 注意：需在 Transaction 內呼叫。
         /// </summary>
         public static Pipe CreateBranchAt(
-            Document doc, RoutingContext ctx, Pipe host, XYZ projPt, bool isStart, string pref)
+            Document doc, RoutingContext ctx, Pipe host, XYZ projPt, XYZ targetPt, string pref)
         {
             if (doc == null) throw new ArgumentNullException(nameof(doc));
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
@@ -31,28 +31,18 @@ namespace RevitMCPCommandSet.Services.Routing
             var res = curve.Project(projPt);
             var onCrv = (res != null) ? res.XYZPoint : curve.Evaluate(0.5, true);
 
-            // 2) 取得幹管方向（曲線切向）
-            var der = curve.ComputeDerivatives(0.5, true);
-            var hostDir = der?.BasisX?.Normalize() ?? (curve.GetEndPoint(1) - curve.GetEndPoint(0)).Normalize();
-
-            // 3) 選擇分支方向：盡量取水平面內與幹管正交
-            var branchDir = SafePerpUnit(hostDir);
-            // 仍可能有極端垂直邊界，最後再兜底
-            if (branchDir.IsZeroLength()) branchDir = XYZ.BasisY;
-
-            // 4) 建立一小段分支管（stub）
-            double stubLen = 0.3; // ~0.3 ft ≈ 91 mm；可視需要調大（例如 0.5 ft）
+            // 3) 建立分支管
             var branchStart = onCrv;
-            var branchEnd = onCrv + branchDir.Multiply(stubLen);
+            var branchEnd = targetPt;
 
             var branch = Pipe.Create(doc, ctx.SystemTypeId, ctx.PipeTypeId, ctx.LevelId, branchStart, branchEnd);
             SetPipeDiameter(branch, ctx.Diameter_ft);
 
-            // 5) 依偏好策略與幹管連接
+            // 4) 依偏好策略與幹管連接
             string prefLower = pref?.ToLowerInvariant();
             if (prefLower == "tee")
             {
-                // 5A) 以 Tee 連接：先把幹管在 onCrv 切斷
+                // 4A) 以 Tee 連接：先把幹管在 onCrv 切斷
                 //     Revit 會回傳新產生的另一段管的 ElementId
                 ElementId newId = PlumbingUtils.BreakCurve(doc, host.Id, onCrv);
                 var host2 = doc.GetElement(newId) as Pipe;
@@ -63,14 +53,14 @@ namespace RevitMCPCommandSet.Services.Routing
 
                 // 分支管取「外端」接頭
                 var cBranch = ConnectorUtils.GetPipeConnectors(branch)
-                    .OrderByDescending(c => c.Origin.DistanceTo(onCrv)).FirstOrDefault();
+                    .OrderBy(c => c.Origin.DistanceTo(onCrv)).FirstOrDefault();
 
                 // 放三通
                 doc.Create.NewTeeFitting(cHostA, cHostB, cBranch);
             }
             else
             {
-                // 5B) 以 Takeoff 連接（預設）
+                // 4B) 以 Takeoff 連接（預設）
                 //     直接將分支外端接頭吸附到幹管
                 var cBranch = ConnectorUtils.GetPipeConnectors(branch)
                     .OrderByDescending(c => c.Origin.DistanceTo(onCrv)).FirstOrDefault();
