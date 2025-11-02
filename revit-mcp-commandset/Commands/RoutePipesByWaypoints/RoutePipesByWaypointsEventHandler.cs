@@ -121,7 +121,8 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                             _doc, ctx, startAttach.Connector, path[0], path[1],
                             _task.MinSegmentLength_mm / 304.8, _task.Tolerance_mm / 304.8, new List<ElementId>() // 先建段
                         );
-                        var lastConn = SegmentBuilder.GetFarEndConnector(segId, startAttach.Connector);                          
+                        Pipe pipe = _doc.GetElement(segId) as Pipe;
+                        var lastConn = ConnectorUtils.GetFarEndConnector(pipe, startAttach.AnchorPoint);                          
                         SegmentBuilder.ConnectToTargetEnd(_doc, ctx, lastConn, endAttach, new List<ElementId>(), _task.Tolerance_mm / 304.8);
                     }
                     else

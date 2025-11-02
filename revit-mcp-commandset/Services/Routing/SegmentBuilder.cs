@@ -24,7 +24,7 @@ namespace RevitMCPCommandSet.Services.Routing
 
 
         /// <summary> 
-        /// 從 fromConn 朝 to 點：方向一致→一段，否則「ㄇ字補段」+彎頭。 
+        /// 從 fromConn 朝 to 點：方向一致→一段，否則折彎+彎頭。 
         /// 回傳最後一段 Pipe 的 ElementId。 
         /// </summary>
         public static ElementId CreatePipeSegmentAlignedOrBent(
@@ -38,6 +38,7 @@ namespace RevitMCPCommandSet.Services.Routing
 
             bool aligned = connDir != null && Math.Abs(connDir.DotProduct(dirWanted)) > 0.99;
             bool isPipe = currentConnector?.Owner is Pipe;
+            // 四種狀況處理：是否為管/方向是否對齊
             if (isPipe)
             {
                 Pipe currentPipe = currentConnector.Owner as Pipe;
@@ -108,13 +109,6 @@ namespace RevitMCPCommandSet.Services.Routing
           
         }
 
-        public static Connector GetFarEndConnector(ElementId pipeId, Connector nearEnd)
-        {
-            var doc = nearEnd?.Owner?.Document;
-            var pipe = (doc?.GetElement(pipeId) as Pipe) ?? (nearEnd?.Owner as Pipe);
-            if (pipe == null) return null;
-            return ConnectorUtils.GetFarEndConnector(pipe, nearEnd);
-        }
 
         public static void ConnectToTargetEnd(
             Document doc, RoutingContext ctx, Connector lastConnector,
@@ -136,7 +130,7 @@ namespace RevitMCPCommandSet.Services.Routing
                         .OrderBy(c => c.Origin.DistanceTo(near.Origin)).First();
                     doc.Create.NewElbowFitting(near, pNear);
 
-                    var pFar = ConnectorUtils.GetFarEndConnector(p, pNear);
+                    var pFar = ConnectorUtils.GetFarEndConnector(p, pNear.Origin);
                     if (pFar != null) doc.Create.NewElbowFitting(pFar, far);
                 }
                 else

@@ -254,10 +254,10 @@ namespace RevitMCPCommandSet.Services.Routing
                     var to = pathPts[i];
                     WriteLog($"[CreateSegments] Seg#{i} {Pt(from)} -> {Pt(to)}");
 
-                    var seg = SegmentBuilder.CreatePipeSegmentAlignedOrBent(doc, ctx, currentConnector, from, to, minSegmentLen_ft, tol_ft, created);
-                    WriteLog($"[CreateSegments] Seg#{i} LastPipeId={seg}");
-
-                    currentConnector = SegmentBuilder.GetFarEndConnector(seg, currentConnector);
+                    var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(doc, ctx, currentConnector, from, to, minSegmentLen_ft, tol_ft, created);
+                    WriteLog($"[CreateSegments] Seg#{i} LastPipeId={segId}");
+                    Pipe seg = doc.GetElement(segId) as Pipe;
+                    currentConnector = ConnectorUtils.GetFarEndConnector(seg, currentConnector.Origin);
                     WriteLog($"[CreateSegments] Seg#{i} NextConn@{Pt(currentConnector?.Origin)}");
                 }
 

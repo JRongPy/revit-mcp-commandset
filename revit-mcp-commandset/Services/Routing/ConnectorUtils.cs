@@ -32,11 +32,11 @@ namespace RevitMCPCommandSet.Services.Routing
                 .FirstOrDefault();
         }
 
-        public static Connector GetFarEndConnector(Pipe pipe, Connector knownEnd)
+        public static Connector GetFarEndConnector(Pipe pipe, XYZ point)
         {
             var cons = GetPipeConnectors(pipe).ToList();
             if (cons.Count != 2) return null;
-            return cons[0].Origin.DistanceTo(knownEnd.Origin)==0 ? cons[1] : cons[0];
+            return cons[0].Origin.DistanceTo(point)==0 ? cons[1] : cons[0];
         }
 
         public static Connector GetSingleFreeEndConnector(Pipe p)
