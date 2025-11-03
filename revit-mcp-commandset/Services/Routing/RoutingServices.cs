@@ -3,6 +3,7 @@ using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Mechanical;
 using Autodesk.Revit.DB.Plumbing;
 using RevitMCPCommandSet.Models.Common;
+using RevitMCPCommandSet.Utils.Routing;
 using System.IO;
 
 namespace RevitMCPCommandSet.Services.Routing
@@ -24,58 +25,9 @@ namespace RevitMCPCommandSet.Services.Routing
         }
 
         public static string Pt(XYZ p) => p == null ? "null" : $"({p.X:F3},{p.Y:F3},{p.Z:F3})";
-        private static string Ptm(JZPoint p) => p == null ? "null" : $"({p.X:F1},{p.Y:F1},{p.Z:F1})mm";
 
         // ================= 型別定義 ========================
         public enum ElementKind { Pipe, FamilyInstance, Other }
-
-        public class AttachPoint
-        {
-            public Connector Connector;     // 若最後落在元件的 connector
-            public XYZ AnchorPoint;         // 真的要從哪裡出發/終止（可能是管上投影點）
-            public Element HostElement;     // 對應元素（管或族）
-            public ElementKind Kind;
-            /// <summary>
-            /// 依 AnchorPoint 重新抓取最合理的 Connector，並更新本物件的 Connector 欄位。
-            /// 回傳取得的 Connector；若取不到則回傳 null。
-            /// </summary>
-            public Connector RefreshConnector()
-            {
-                if (HostElement == null || AnchorPoint == null) return null;
-                try
-                {
-                    switch (Kind)
-                    {
-                        case RoutingServices.ElementKind.Pipe:
-                            {
-                                var pipe = HostElement as Autodesk.Revit.DB.Plumbing.Pipe;
-                                var conns = ConnectorUtils.GetPipeConnectors(pipe);
-                                var nearest = conns
-                                    .OrderBy(c => c.Origin.DistanceTo(AnchorPoint))
-                                    .FirstOrDefault();
-                                Connector = nearest;
-                                return Connector;
-                            }
-                        case RoutingServices.ElementKind.FamilyInstance:
-                            {
-                                var fi = HostElement as FamilyInstance;
-                                if (fi == null) break;
-
-                                var nearest = ConnectorUtils.FindNearestConnector(fi, AnchorPoint);
-
-                                Connector = nearest;
-                                return Connector;
-
-                            }
-                    }
-                }
-                catch
-                {
-                    // ignore & fall through to return null
-                }
-                return null;
-            }
-        }
 
         // --- Step1: 分類
         public static ElementKind Classify(Element e)
@@ -85,14 +37,6 @@ namespace RevitMCPCommandSet.Services.Routing
                        ElementKind.Other;
             WriteLog($"[Classify] {e?.Id} -> {kind}");
             return kind;
-        }
-
-        // --- Step2: family 必須能提供連接器
-        public static void EnsureHasConnectors(FamilyInstance fi)
-        {
-            var has = fi?.MEPModel?.ConnectorManager?.Connectors?.Cast<Connector>()?.Any() ?? false;
-            WriteLog($"[EnsureHasConnectors] FI:{fi?.Id} Has={has}");
-            if (!has) throw new InvalidOperationException($"族 {fi.Id.Value} 無 MEP 連接器");
         }
 
         // --- Step3: 推斷/取得必要資訊
@@ -127,7 +71,7 @@ namespace RevitMCPCommandSet.Services.Routing
                 // 若從 family 端取直徑
                 if (ctx.Diameter_ft <= 0)
                 {
-                    var d = TryGetConnectorDiameterFt(s);
+                    var d = ConnectorUtils.TryGetConnectorDiameterFt(s);
                     if (d > 0) ctx.Diameter_ft = d;
                 }
 
@@ -159,72 +103,6 @@ namespace RevitMCPCommandSet.Services.Routing
                 throw;
             }
         }
-
-        // --- Step4: 解析 AttachPoint（含：就近 connector？或管上投影+Tee/Takeoff）
-        public static AttachPoint ResolveAttachPoint(Document doc, Element host, RouteTask task, bool isStart, RoutingContext ctx)
-        {
-            WriteLog($"[ResolveAttach][IN] Host={host?.Id}, Kind={Classify(host)}, isStart={isStart}");
-            var kind = Classify(host);
-
-            try
-            {
-                if (kind == ElementKind.FamilyInstance)
-                {
-                    var wpt = (isStart ? task.Waypoints.FirstOrDefault() : task.Waypoints.LastOrDefault());
-                    var target = wpt == null ? GetOrigin(host) : new XYZ(wpt.X / 304.8, wpt.Y / 304.8, wpt.Z / 304.8);
-
-                    var nearest = ConnectorUtils.FindNearestConnector((FamilyInstance)host, target);
-                    if (nearest == null) throw new InvalidOperationException($"找不到 {host.Id} 的接點");
-
-                    var ap = new AttachPoint { Connector = nearest, AnchorPoint = nearest.Origin, HostElement = host, Kind = kind };
-                    WriteLog($"[ResolveAttach][FI] Conn@{Pt(nearest.Origin)}");
-                    return ap;
-                }
-                else if (kind == ElementKind.Pipe)
-                {
-                    var pipe = (Pipe)host;
-                    var wpt = (isStart ? task.Waypoints.FirstOrDefault() : task.Waypoints.LastOrDefault());
-                    if (wpt == null)
-                    {
-                        var endPt = GetLocationEnd(pipe, isStart);
-                        wpt = new JZPoint { X = ToMM(endPt.X), Y = ToMM(endPt.Y), Z = ToMM(endPt.Z) };
-                    }
-
-                    var p = new XYZ(wpt.X / 304.8, wpt.Y / 304.8, wpt.Z / 304.8);
-                    var curve = (host.Location as LocationCurve).Curve;
-                    var proj = curve.Project(p);
-                    var projPt = proj?.XYZPoint ?? curve.Evaluate(0.5, true);
-                    WriteLog($"[ResolveAttach][Pipe] Wpt={Ptm(wpt)} -> Proj={Pt(projPt)}");
-
-                    // 近端 connector 直接用
-                    var pipeConn = ConnectorUtils.GetPipeConnectors(pipe);
-                    var nearConn = pipeConn?.OrderBy(c => c.Origin.DistanceTo(projPt)).FirstOrDefault();
-                    if (nearConn != null && nearConn.Origin.DistanceTo(projPt) <= ctx.Tolerance_ft)
-                    {
-                        var ap = new AttachPoint { Connector = nearConn, AnchorPoint = nearConn.Origin, HostElement = host, Kind = kind };
-                        WriteLog($"[ResolveAttach][Pipe] UseNearConn Dist={nearConn.Origin.DistanceTo(projPt):F4}ft");
-                        return ap;
-                    }
-
-                    // 否則分支（注意：需在 Transaction 內呼叫本方法）
-                    if (!doc.IsModifiable)
-                        WriteLog("[ResolveAttach][WARN] CreateBranchAt called when doc not modifiable (ensure transaction started before calling).");
-
-                    var branch = FittingPlacer.CreateBranchAt(doc, ctx, pipe, projPt, p, "Tee");
-                    var ap2 = new AttachPoint { Connector = ConnectorUtils.GetSingleFreeEndConnector(branch), AnchorPoint = ConnectorUtils.GetFreeEndPoint(branch), HostElement = branch, Kind = ElementKind.Pipe };
-                    WriteLog($"[ResolveAttach][Pipe] BranchCreated BranchId={branch?.Id.IntegerValue}, Anchor={Pt(ap2.AnchorPoint)}");
-                    return ap2;
-                }
-
-                throw new InvalidOperationException("僅支援 Pipe / FamilyInstance 作為起訖端");
-            }
-            catch (Exception ex)
-            {
-                WriteLog($"[ResolveAttach][ERR] Host={host?.Id.IntegerValue} {ex}");
-                throw;
-            }
-        }
-
         // --- Step5: 產生世界座標路徑
         public static List<XYZ> BuildPathWorldPoints(XYZ start, List<JZPoint> mids, XYZ end)
         {
@@ -257,7 +135,7 @@ namespace RevitMCPCommandSet.Services.Routing
                     var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(doc, ctx, currentConnector, from, to, minSegmentLen_ft, tol_ft, created);
                     WriteLog($"[CreateSegments] Seg#{i} LastPipeId={segId}");
                     Pipe seg = doc.GetElement(segId) as Pipe;
-                    currentConnector = ConnectorUtils.GetFarEndConnector(seg, currentConnector.Origin);
+                    currentConnector = ConnectorUtils.GetFarConnector(seg, currentConnector.Origin);
                     WriteLog($"[CreateSegments] Seg#{i} NextConn@{Pt(currentConnector?.Origin)}");
                 }
 
@@ -351,26 +229,7 @@ namespace RevitMCPCommandSet.Services.Routing
             return ElementId.InvalidElementId;
         }
 
-        /// <summary>
-        /// 嘗試從元素取得可用的「圓管直徑（ft）」。Pipe → p.Diameter；FamilyInstance → 取圓形 connector 的 Radius*2 最大值。
-        /// </summary>
-        public static double TryGetConnectorDiameterFt(Element e)
-        {
-            if (e is Pipe p && p.Diameter > 0) return p.Diameter;
-
-            double best = 0.0;
-            foreach (var c in ConnectorUtils.GetConnectors(e))
-            {
-                try
-                {
-                    // 圓形管徑：Radius（ft）
-                    double d = 2.0 * c.Radius;
-                    if (d > best) best = d;
-                }
-                catch { /* 某些 connector 可能不是 round */ }
-            }
-            return best;
-        }
+        
         /// <summary>
         /// 嘗試找 Level：Pipe → ReferenceLevel；FamilyInstance → LevelId；其他 → 取 bbox.Z 接近的 Level。
         /// </summary>

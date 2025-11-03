@@ -8,6 +8,7 @@ using Autodesk.Revit.DB.Plumbing;
 using Autodesk.Revit.UI;
 using RevitMCPCommandSet.Models.Common;
 using RevitMCPCommandSet.Services.Routing;
+using RevitMCPCommandSet.Utils.Routing;
 using RevitMCPSDK.API.Interfaces;
 using static RevitMCPCommandSet.Services.Routing.RoutingServices;
 
@@ -47,7 +48,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
         public void Execute(UIApplication uiapp)
         {
             _uiApp = uiapp;
-            var created = new List<int>();
+            var created = new List<ElementId>();
 
             try
             {
@@ -67,9 +68,9 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                 var endKind = Classify(endEle);
 
                 if (startKind == ElementKind.FamilyInstance)
-                    EnsureHasConnectors((FamilyInstance)startEle);
+                    ConnectorUtils.EnsureHasConnectors((FamilyInstance)startEle);
                 if (endKind == ElementKind.FamilyInstance)
-                    EnsureHasConnectors((FamilyInstance)endEle);
+                    ConnectorUtils.EnsureHasConnectors((FamilyInstance)endEle);
 
                 // 3) 推斷上下文
                 var ctx = InferRoutingContext(_doc, startEle, endEle, _task);
@@ -103,7 +104,6 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                     path = NormalizePathPoints(path, ctx.Tolerance_ft, _task.angleTolerance_deg);
                     WriteLog($"[CreateSegments][NormalizedPts] path point count: {path.Count}");
 
-
                     // 6) 實際建模
                     if (path.Count == 1)
                     {
@@ -111,10 +111,11 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                         WriteLog("[CreateSegments] path.Count == 1 → 嘗試直接以接頭連接");
                         try
                         {
-                            _doc.Create.NewElbowFitting(
+                            var element = _doc.Create.NewElbowFitting(
                                 startAnchor.AnchorConnector,
                                 endAnchor.AnchorConnector
                             );
+                            created.Add(element.Id);
                         }
                         catch (Exception ex)
                         {
@@ -128,11 +129,12 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                         WriteLog($"[CreateSegments] path.Count == 2 → 直連 {Pt(path[0])} -> {Pt(path[1])}");
                         var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(
                             _doc, ctx, startAnchor.AnchorConnector, path[0], path[1],
-                            _task.MinSegmentLength_mm / 304.8, _task.Tolerance_mm / 304.8, new List<ElementId>() // 先建段
+                            _task.MinSegmentLength_mm / 304.8, _task.Tolerance_mm / 304.8, created // 先建段
                         );
                         Pipe pipe = _doc.GetElement(segId) as Pipe;
-                        var lastConn = ConnectorUtils.GetFarEndConnector(pipe, startAnchor.AnchorPoint);
-                        SegmentBuilder.ConnectToTargetEnd(_doc, ctx, lastConn, endAnchor, new List<ElementId>(), _task.Tolerance_mm / 304.8);
+                        var lastConn = ConnectorUtils.GetFarConnector(pipe, startAnchor.AnchorPoint);
+                        SegmentBuilder.ConnectToTargetEnd(_doc, ctx, lastConn, endAnchor, created, _task.Tolerance_mm / 304.8);
+                        created.Add(segId);
                     }
                     else
                     {
@@ -141,19 +143,18 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                              _task.MinSegmentLength_mm / 304.8,
                              _task.RoutingPreference, _task.Tolerance_mm / 304.8
                          );
-                        created.AddRange(segCreated.Select(id => id.IntegerValue));
+                        created.AddRange(segCreated);
                     }
 
                     t.Commit();
                 }
 
                 WriteLog($"[SUCCESS] Created {created.Count} elements: {string.Join(", ", created)}");
-
                 Result = new AIResult<List<int>>
                 {
                     Success = true,
                     Message = $"路由完成，生成 {created.Count} 個元素（管段/彎頭/Tee/Takeoff）",
-                    Response = created
+                    Response = created.Select(id => id.IntegerValue).ToList()
                 };
             }
             catch (Exception ex)

@@ -8,6 +8,7 @@ using RevitMCPCommandSet.Models.Common;
 using static RevitMCPCommandSet.Services.Routing.RoutingServices;
 using System.Threading.Tasks;
 using System.Collections;
+using RevitMCPCommandSet.Utils.Routing;
 
 namespace RevitMCPCommandSet.Services.Routing
 {
@@ -28,6 +29,7 @@ namespace RevitMCPCommandSet.Services.Routing
         public Element AnchorElement { get; private set; }  // 錨定物件，可能是 HostElement 也可能其他物件
         public Element HostElement { get; private set; } //輸入的主物件
         public ElementKind Kind { get; private set; }  // HostElement 的型別
+        public List<ElementId> CreatedElementIds { get; } = new List<ElementId>();
 
         public ElementId PipeTypeId { get; }
         public ElementId SystemTypeId { get; }
@@ -65,7 +67,9 @@ namespace RevitMCPCommandSet.Services.Routing
 
         // ---- Public helpers -------------------------------------------------
 
-        /// <summary>在你更新了 AnchorPoint（或 HostElement 變動）後，可重取當前最近的 Connector。</summary>
+        /// <summary>
+        /// 更新 AnchorPoint或 HostElement 變動後，重取當前最近的 Connector。
+        /// </summary>
         public Connector RefreshConnector()
         {
             switch (Kind)
@@ -73,8 +77,8 @@ namespace RevitMCPCommandSet.Services.Routing
                 case ElementKind.Pipe:
                     {
                         var p = HostElement as Pipe;
-                        var conns = ConnectorUtils.GetPipeConnectors(p);
-                        AnchorConnector = conns?
+                        var conns = ConnectorUtils.GetConnectors(p);
+                        AnchorConnector = conns?            
                             .OrderBy(c => c.Origin.DistanceTo(AnchorPoint))
                             .FirstOrDefault();
                         break;
@@ -82,7 +86,7 @@ namespace RevitMCPCommandSet.Services.Routing
                 case ElementKind.FamilyInstance:
                     {
                         var fi = HostElement as FamilyInstance;
-                        AnchorConnector = ConnectorUtils.FindNearestConnector(fi, AnchorPoint);
+                        AnchorConnector = ConnectorUtils.GetNearConnector(fi, AnchorPoint);
                         break;
                     }
                 default:
@@ -92,8 +96,9 @@ namespace RevitMCPCommandSet.Services.Routing
             return AnchorConnector;
         }
 
-        // ---- Core building --------------------------------------------------
-
+        /// <summary>
+        /// 建構AnchorElement與AnchorConnector
+        /// </summary>
         private void BuildAnchorElement(bool isStart)
         {
             var targetPoint = ComputeTargetPoint(_task, isStart);
@@ -116,20 +121,8 @@ namespace RevitMCPCommandSet.Services.Routing
         }
 
         /// <summary>
-        /// 嘗試設定管徑（英尺）
+        /// HostElement 為 Pipe 時的 Anchor 建構邏輯
         /// </summary>
-        private static void TryApplyDiameter(Pipe pipe, double diameter_ft)
-        {
-            try
-            {
-                if (pipe == null || diameter_ft <= 0) return;
-                var prm = pipe.get_Parameter(BuiltInParameter.RBS_PIPE_DIAMETER_PARAM);
-                if (prm != null && !prm.IsReadOnly)
-                    prm.Set(diameter_ft);
-            }
-            catch { /* 忽略設定失敗，不影響主流程 */ }
-        }
-
         private void ResolveOnPipe(bool isStart, XYZ targetPoint)
         {
             // 邏輯：
@@ -150,7 +143,7 @@ namespace RevitMCPCommandSet.Services.Routing
             bool nearEnd1 = projPt.DistanceTo(end1) <= _tol_ft;
 
             // 先抓本管的兩端 connector（端點情境會用得到）
-            var pipeConns = ConnectorUtils.GetPipeConnectors(pipe)?.ToList() ?? new List<Connector>();
+            var pipeConns = ConnectorUtils.GetConnectors(pipe)?.ToList() ?? new List<Connector>();
 
             // ============== 情境 A：投影接近端點 ==============
             if (nearEnd0 || nearEnd1)
@@ -175,7 +168,7 @@ namespace RevitMCPCommandSet.Services.Routing
                         AnchorElement = pipe;             // 仍為原幹管
                         AnchorPoint = targetPoint;          // 端點 connector
                         // 端點更新後需要重新取用
-                        var refreshed = ConnectorUtils.GetPipeConnectors(pipe)
+                        var refreshed = ConnectorUtils.GetConnectors(pipe)
                                         .OrderBy(c => c.Origin.DistanceTo(targetPoint))
                                         .FirstOrDefault();
                         if (refreshed == null)
@@ -194,7 +187,8 @@ namespace RevitMCPCommandSet.Services.Routing
 
             // ============== 情境 B：投影不接近端點 或 端點被占用（中段開 Tee/Takeoff） ==============
             // 依偏好在投影點開 Tee/Takeoff，回傳新建「分支管」
-            var branch = FittingPlacer.CreateBranchAt(_doc, _ctx, pipe, projPt, targetPoint, _routingPref);
+            var branch = SegmentBuilder.CreateBranchAt(_doc, _ctx, pipe, projPt, targetPoint, _routingPref);
+            CreatedElementIds.Add(branch.Id);
             if (branch == null)
                 throw new InvalidOperationException("CreateBranchAt 失敗，無法建立分支管");
 
@@ -203,14 +197,16 @@ namespace RevitMCPCommandSet.Services.Routing
             Kind = ElementKind.Pipe;
 
             AnchorConnector = ConnectorUtils.GetSingleFreeEndConnector(branch)
-                              ?? ConnectorUtils.GetPipeConnectors(branch)
+                              ?? ConnectorUtils.GetConnectors(branch)
                                    .OrderBy(c => c.AllRefs.Cast<Connector>().Any() ? 1 : 0) // 優先挑沒被連接的
                                    .FirstOrDefault();
 
-            // 安全防呆：若仍抓不到，退回分支幾何末端
-            AnchorPoint = AnchorConnector?.Origin ?? ConnectorUtils.GetFreeEndPoint(branch);
+            AnchorPoint = AnchorConnector?.Origin;
         }
 
+        /// <summary>
+        /// HostElement 為 FamilyInstance 時的 Anchor 建構邏輯
+        /// </summary>
         private void ResolveOnFamily(XYZ targetPoint)
         {
             var fi = HostElement as FamilyInstance
@@ -258,22 +254,29 @@ namespace RevitMCPCommandSet.Services.Routing
 
             // 4) 建管
             var pipe = Pipe.Create(_doc, _ctx.PipeTypeId, _ctx.LevelId, fiConnector, pEnd);
-            TryApplyDiameter(pipe, _ctx.Diameter_ft);
+            PipeUtils.SetPipeDiameter(pipe, _ctx.Diameter_ft);
 
-            // 5) 將新管作為 Anchor，取自由端 connector
+            // 5) 將新管作為 Anchor，取離targetPoint 近端 connector
             AnchorElement = pipe;
-            AnchorConnector = ConnectorUtils.GetPipeConnectors(pipe).OrderBy(c => c.Origin.DistanceTo(targetPoint)).First();
+            AnchorConnector = ConnectorUtils.GetConnectors(pipe).OrderBy(c => c.Origin.DistanceTo(targetPoint)).First();
             AnchorPoint = AnchorConnector?.Origin;
 
             if (AnchorConnector == null)
                 throw new InvalidOperationException("ResolveOnFamily 失敗：無法取得新建管段的自由端 Connector");
         }
 
+
+
+        // ---- Utilities ------------------------------------------------------
+
+        /// <summary>
+        /// 判斷 Connector 朝向是否與 指向 target 點的方向「共線」
+        /// </summary>
         private bool IsColinearToTarget(Connector conn, XYZ target)
         {
-            if (conn == null || target == null) return false;  // 直接拋錯
+            if (conn == null || target == null) return false; 
             var dir = (target - conn.Origin);
-            if (dir.IsZeroLength()) return true;   // 直接拋錯
+            if (dir.IsZeroLength()) return true; 
             dir = dir.Normalize();
             var axis = conn.CoordinateSystem?.BasisZ;
             if (axis == null) return false;
@@ -281,8 +284,6 @@ namespace RevitMCPCommandSet.Services.Routing
             var ang = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))) * 180.0 / Math.PI;
             return ang <= _tol_deg;
         }
-
-        // ---- Utilities ------------------------------------------------------
 
         /// <summary>
         /// 決定目前端點要「指向哪裡」

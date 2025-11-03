@@ -1,5 +1,6 @@
 ﻿using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Plumbing;
+using RevitMCPCommandSet.Utils.Routing;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -47,13 +48,13 @@ namespace RevitMCPCommandSet.Services.Routing
                 {
                     // 方向不一致但接頭來自 Pipe → 直接打一段到目標
                     var newPipe = Pipe.Create(doc, ctx.SystemTypeId, ctx.PipeTypeId, ctx.LevelId, start, toPoint);
-                    SetPipeDiameter(newPipe, ctx.Diameter_ft);
+                    PipeUtils.SetPipeDiameter(newPipe, ctx.Diameter_ft);
                     acc?.Add(newPipe.Id);
                     // 取得newPipe來自start端的connector
-                    Connector newPipeStartConn = ConnectorUtils.GetPipeConnectors(newPipe)
+                    Connector newPipeStartConn = ConnectorUtils.GetConnectors(newPipe)
                         .OrderBy(c => c.Origin.DistanceTo(start)).First();
                     // 放彎頭
-                    Connector targetCurrentConn = ConnectorUtils.GetPipeConnectors(currentPipe)
+                    Connector targetCurrentConn = ConnectorUtils.GetConnectors(currentPipe)
                         .OrderBy(c => c.Origin.DistanceTo(start)).First();
                     try {
                         var elbow = doc.Create.NewElbowFitting(targetCurrentConn, newPipeStartConn);
@@ -80,17 +81,17 @@ namespace RevitMCPCommandSet.Services.Routing
                     // 先沿接頭方向推出一小段，再轉向目標
                     var kickEnd = start + connDir.Multiply(minSegmentLen_ft);
                     var p1 = Pipe.Create(doc, ctx.PipeTypeId, ctx.LevelId, currentConnector, kickEnd);
-                    SetPipeDiameter(p1, ctx.Diameter_ft);
+                    PipeUtils.SetPipeDiameter(p1, ctx.Diameter_ft);
                     acc?.Add(p1.Id);
 
                     // 第二段朝目標
                     var p2 = Pipe.Create(doc, ctx.SystemTypeId, ctx.PipeTypeId, ctx.LevelId, kickEnd, toPoint);
-                    SetPipeDiameter(p2, ctx.Diameter_ft);
+                    PipeUtils.SetPipeDiameter(p2, ctx.Diameter_ft);
                     acc?.Add(p2.Id);
 
                     // 在兩段相接點放「彎頭」
-                    var c1 = ConnectorUtils.GetPipeConnectors(p1).OrderBy(c => c.Origin.DistanceTo(kickEnd)).Last();
-                    var c2 = ConnectorUtils.GetPipeConnectors(p2).OrderBy(c => c.Origin.DistanceTo(kickEnd)).First();
+                    var c1 = ConnectorUtils.GetConnectors(p1).OrderBy(c => c.Origin.DistanceTo(kickEnd)).Last();
+                    var c2 = ConnectorUtils.GetConnectors(p2).OrderBy(c => c.Origin.DistanceTo(kickEnd)).First();
                     var elbow = doc.Create.NewElbowFitting(c1, c2);
                     acc?.Add(elbow.Id);
 
@@ -100,7 +101,7 @@ namespace RevitMCPCommandSet.Services.Routing
                 {
                     // 方向一致：直接打一段
                     var p = Pipe.Create(doc, ctx.PipeTypeId, ctx.LevelId, currentConnector, toPoint);
-                    SetPipeDiameter(p, ctx.Diameter_ft);
+                    PipeUtils.SetPipeDiameter(p, ctx.Diameter_ft);
                     acc?.Add(p.Id);
                     return p.Id;
                 }
@@ -123,14 +124,14 @@ namespace RevitMCPCommandSet.Services.Routing
                 if (near.Origin.DistanceTo(far.Origin) > tol_ft)
                 {
                     var p = Pipe.Create(doc, ctx.SystemTypeId, ctx.PipeTypeId, ctx.LevelId, near.Origin, far.Origin);
-                    SetPipeDiameter(p, ctx.Diameter_ft);
+                    PipeUtils.SetPipeDiameter(p, ctx.Diameter_ft);
                     acc?.Add(p.Id);
 
-                    var pNear = ConnectorUtils.GetPipeConnectors(p)
+                    var pNear = ConnectorUtils.GetConnectors(p)
                         .OrderBy(c => c.Origin.DistanceTo(near.Origin)).First();
                     doc.Create.NewElbowFitting(near, pNear);
 
-                    var pFar = ConnectorUtils.GetFarEndConnector(p, pNear.Origin);
+                    var pFar = ConnectorUtils.GetFarConnector(p, pNear.Origin);
                     if (pFar != null) doc.Create.NewElbowFitting(pFar, far);
                 }
                 else
@@ -142,18 +143,70 @@ namespace RevitMCPCommandSet.Services.Routing
 
             // 終點無connector → 打最後一段到 anchor point（必要時後續再行處理轉接）
             var finalPipe = Pipe.Create(doc, ctx.SystemTypeId, ctx.PipeTypeId, ctx.LevelId, lastConnector.Origin, end.AnchorPoint);
-            SetPipeDiameter(finalPipe, ctx.Diameter_ft);
+            PipeUtils.SetPipeDiameter(finalPipe, ctx.Diameter_ft);
             acc?.Add(finalPipe.Id);
         }
 
-        private static void SetPipeDiameter(Pipe p, double diameterFt)
+
+        /// <summary>
+        /// 在幹管 host 的 projPt 位置建立分支。
+        /// pref = "Takeoff" → 以 Takeoff 吸附；"Tee" → 切斷後以 Tee 連接。
+        /// 回傳：新建的分支 Pipe（供後續繼續佈管使用）。
+        /// 注意：需在 Transaction 內呼叫。
+        /// </summary>
+        public static Pipe CreateBranchAt(
+            Document doc, RoutingContext ctx, Pipe host, XYZ projPt, XYZ targetPt, string pref)
         {
-            if (diameterFt > 0)
+            if (doc == null) throw new ArgumentNullException(nameof(doc));
+            if (ctx == null) throw new ArgumentNullException(nameof(ctx));
+            if (host == null) throw new ArgumentNullException(nameof(host));
+            if (!(host.Location is LocationCurve lc) || lc.Curve == null)
+                throw new InvalidOperationException("Host pipe has no valid LocationCurve.");
+
+            // 1) 將 projPt 投影到幹管中心線，確保在曲線上
+            var curve = lc.Curve;
+            var res = curve.Project(projPt);
+            var onCrv = (res != null) ? res.XYZPoint : curve.Evaluate(0.5, true);
+
+            // 3) 建立分支管
+            var branchStart = onCrv;
+            var branchEnd = targetPt;
+
+            var branch = Pipe.Create(doc, ctx.SystemTypeId, ctx.PipeTypeId, ctx.LevelId, branchStart, branchEnd);
+            PipeUtils.SetPipeDiameter(branch, ctx.Diameter_ft);
+
+            // 4) 依偏好策略與幹管連接
+            string prefLower = pref?.ToLowerInvariant();
+            if (prefLower == "tee")
             {
-                var diaParam = p.get_Parameter(BuiltInParameter.RBS_PIPE_DIAMETER_PARAM);
-                if (diaParam != null && !diaParam.IsReadOnly)
-                    diaParam.Set(diameterFt);
+                // 4A) 以 Tee 連接：先把幹管在 onCrv 切斷
+                //     Revit 會回傳新產生的另一段管的 ElementId
+                ElementId newId = PlumbingUtils.BreakCurve(doc, host.Id, onCrv);
+                var host2 = doc.GetElement(newId) as Pipe;
+
+                // 取兩段幹管在切點附近的端頭接頭（各取一端）
+                var cHostA = ConnectorUtils.GetNearConnector(host, onCrv);
+                var cHostB = ConnectorUtils.GetNearConnector(host2, onCrv);
+
+                // 分支管取「外端」接頭
+                var cBranch = ConnectorUtils.GetConnectors(branch)
+                    .OrderBy(c => c.Origin.DistanceTo(onCrv)).FirstOrDefault();
+
+                // 放三通
+                doc.Create.NewTeeFitting(cHostA, cHostB, cBranch);
             }
+            else
+            {
+                // 4B) 以 Takeoff 連接（預設）
+                //     直接將分支外端接頭吸附到幹管
+                var cBranch = ConnectorUtils.GetConnectors(branch)
+                    .OrderByDescending(c => c.Origin.DistanceTo(onCrv)).FirstOrDefault();
+
+                // NewTakeoffFitting(connector, trunkCurve)
+                doc.Create.NewTakeoffFitting(cBranch, host);
+            }
+
+            return branch;
         }
     }
 }
