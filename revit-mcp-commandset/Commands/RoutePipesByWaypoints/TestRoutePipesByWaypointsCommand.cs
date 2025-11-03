@@ -49,17 +49,16 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                 {
                     StartElementId = startEl.Id.IntegerValue,
                     EndElementId = endEl.Id.IntegerValue,
-                    Waypoints = new List<JZPoint> {
-                        new JZPoint(
-                            x:10*304.8,
-                            y:30*304.8,
-                            z:pStart.Z*304.8
-                        )
-                    },
-                    MinSegmentLength_mm = 1000,
+                    Waypoints = new List<JZPoint> {},
+                    MinSegmentLength_mm = 1500,
                     RoutingPreference = "Tee",
                     Tolerance_mm = 10
-                };                     
+                };                   
+                if (false)
+                {
+                    var wp = new JZPoint(x: 10 * 304.8, y: 30 * 304.8, z: pStart.Z * 304.8);
+                    task.Waypoints.Add(wp);
+                }
 
                 // 3) 執行事件處理器（內含 Transaction）
                 var handler = new RoutePipesByWaypointsEventHandler();

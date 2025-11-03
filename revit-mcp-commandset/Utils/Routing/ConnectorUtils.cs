@@ -86,6 +86,15 @@ namespace RevitMCPCommandSet.Utils.Routing
             }
             return best;
         }
+
+        /// <summary>
+        /// Get a safe direction vector from a connector (normalized).
+        /// Uses CoordinateSystem.BasisZ.
+        /// </summary>
+        public static XYZ GetConnectorDirection(Connector c)
+        {
+            return c.CoordinateSystem?.BasisZ.Normalize() ?? XYZ.Zero;
+        }
     }
 
 }

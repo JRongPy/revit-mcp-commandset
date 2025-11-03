@@ -12,5 +12,7 @@ namespace RevitMCPCommandSet.Services.Routing
         public ElementId LevelId { get; set; }
         public double Diameter_ft { get; set; }
         public double Tolerance_ft { get; set; }
+        public double MinSegmentLength_ft { get; set; }
+        public double Tolerance_deg { get; set; }
     }
 }

@@ -49,6 +49,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
         {
             _uiApp = uiapp;
             var created = new List<ElementId>();
+            List<Element> unions = new List<Element>(); // 儲存所有新建的接頭元素，後續將其移除
 
             try
             {
@@ -72,29 +73,32 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                 if (endKind == ElementKind.FamilyInstance)
                     ConnectorUtils.EnsureHasConnectors((FamilyInstance)endEle);
 
-                // 3) 推斷上下文
+                // 3) 生成配管資訊
                 var ctx = InferRoutingContext(_doc, startEle, endEle, _task);
                 WriteLog($"[CONTEXT] SystemTypeId={ctx.SystemTypeId}, PipeTypeId={ctx.PipeTypeId}, LevelId={ctx.LevelId}, Diameter={ctx.Diameter_ft * 304.8:F1} mm");
+
+                // 3.5) Auto-infer waypoint(s) when none are provided
+                if (_task.Waypoints == null || _task.Waypoints.Count == 0)
+                {
+                    var wp = InferWaypointsIfEmpty(_doc, startEle, endEle, ctx);
+                    WriteLog($"[Waypoints] Inferred {wp.Count} waypoint(s).");                      
+                    if (wp.Count == 0)
+                        throw new InvalidOperationException("未提供路由途經點，且無法推論，請重新執行路由指令。");
+                    _task.Waypoints.AddRange(wp.Select(p => new JZPoint(p.X * 304.8, p.Y * 304.8, p.Z * 304.8)));
+                    WriteLog($"[Waypoints] Inferred:newTask: {SerializeTask(_task)}");
+
+                }
 
                 using (var t = new Transaction(_doc, "Route Pipes by Waypoints"))
                 {
                     t.Start();
-                    // todo 前處理：
-                    // 如果 Waypoints == 0 則
-                    // 如果兩根管是兩根管，則直接處理(依情況用Elbow/ tee / takeoff等)
-                    // 如果兩根管平行則直接報錯，無法判斷
-                    // 如果兩根管共線則直接用 NewUnionFitting 連接
-                    // 如果是管 + FamilyInstance且平行，則嘗試延伸管直接連接
-                    // 如果是管 + FamilyInstance 但不平行，則嘗試從FI生一段管，然後Elbow/ tee / takeoff連接
-                    // 如果是都是 FamilyInstance 但不平行，則嘗試從最近的接頭生一段管，然後Elbow/ tee / takeoff連接
-                    // 如果是都是 FamilyInstance 且共線，則嘗試從最近的接頭生一段管對接
-                    // 否則報錯無法判斷
-                    // 如果 Waypoints != 0 則先透過 Waypoints 找出兩端可能的 connector 並且進行 Waypoints 的整理，如果退化到 0 則回到上面邏輯
 
                     // 4) 建立錨點
                     var startAnchor = new RoutingAnchor(_doc, startEle, _task, true, ctx);
                     var endAnchor = new RoutingAnchor(_doc, endEle, _task, true, ctx);
                     WriteLog($"startAnchor: {startAnchor.AnchorPoint}, endAnchor: {endAnchor.AnchorPoint}");
+                    if (startAnchor.CreatedElementIds.Count >0) created.AddRange(startAnchor.CreatedElementIds);
+                    if (endAnchor.CreatedElementIds.Count >0) created.AddRange(endAnchor.CreatedElementIds);
 
                     // 5) 組合路徑
                     var path = BuildPathWorldPoints(startAnchor.AnchorPoint, _task.Waypoints, endAnchor.AnchorPoint);
@@ -109,13 +113,12 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                     {
                         // 起訖重合或都被吸收
                         WriteLog("[CreateSegments] path.Count == 1 → 嘗試直接以接頭連接");
+                        
+
                         try
                         {
-                            var element = _doc.Create.NewElbowFitting(
-                                startAnchor.AnchorConnector,
-                                endAnchor.AnchorConnector
-                            );
-                            created.Add(element.Id);
+                            var elementId = PipeUtils.TryCreateElbow(_doc, startAnchor.AnchorElement as Pipe, endAnchor.AnchorElement as Pipe, startAnchor.AnchorPoint);
+                            created.Add(elementId);
                         }
                         catch (Exception ex)
                         {
@@ -132,8 +135,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                             _task.MinSegmentLength_mm / 304.8, _task.Tolerance_mm / 304.8, created // 先建段
                         );
                         Pipe pipe = _doc.GetElement(segId) as Pipe;
-                        var lastConn = ConnectorUtils.GetFarConnector(pipe, startAnchor.AnchorPoint);
-                        SegmentBuilder.ConnectToTargetEnd(_doc, ctx, lastConn, endAnchor, created, _task.Tolerance_mm / 304.8);
+                        PipeUtils.TryCreateElbow(_doc, pipe, endAnchor.AnchorElement as Pipe, endAnchor.AnchorPoint);
                         created.Add(segId);
                     }
                     else

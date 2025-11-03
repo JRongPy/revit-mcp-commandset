@@ -187,8 +187,7 @@ namespace RevitMCPCommandSet.Services.Routing
 
             // ============== 情境 B：投影不接近端點 或 端點被占用（中段開 Tee/Takeoff） ==============
             // 依偏好在投影點開 Tee/Takeoff，回傳新建「分支管」
-            var branch = SegmentBuilder.CreateBranchAt(_doc, _ctx, pipe, projPt, targetPoint, _routingPref);
-            CreatedElementIds.Add(branch.Id);
+            var branch = SegmentBuilder.CreateBranchAt(_doc, _ctx, pipe, projPt, targetPoint, _routingPref, CreatedElementIds);
             if (branch == null)
                 throw new InvalidOperationException("CreateBranchAt 失敗，無法建立分支管");
 
@@ -201,7 +200,7 @@ namespace RevitMCPCommandSet.Services.Routing
                                    .OrderBy(c => c.AllRefs.Cast<Connector>().Any() ? 1 : 0) // 優先挑沒被連接的
                                    .FirstOrDefault();
 
-            AnchorPoint = AnchorConnector?.Origin;
+            AnchorPoint = AnchorConnector?.Origin ?? XYZ.Zero;
         }
 
         /// <summary>
@@ -255,6 +254,7 @@ namespace RevitMCPCommandSet.Services.Routing
             // 4) 建管
             var pipe = Pipe.Create(_doc, _ctx.PipeTypeId, _ctx.LevelId, fiConnector, pEnd);
             PipeUtils.SetPipeDiameter(pipe, _ctx.Diameter_ft);
+            CreatedElementIds.Add(pipe.Id);
 
             // 5) 將新管作為 Anchor，取離targetPoint 近端 connector
             AnchorElement = pipe;

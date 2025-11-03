@@ -43,7 +43,10 @@ namespace RevitMCPCommandSet.Services.Routing
         public static RoutingContext InferRoutingContext(Document doc, Element s, Element e, RouteTask task)
         {
             WriteLog($"[InferCtx][IN] S={s?.Id}, E={e?.Id}, Override?={(task?.Override != null)}");
-            var ctx = new RoutingContext { Tolerance_ft = task.Tolerance_mm / 304.8 };
+            var ctx = new RoutingContext { 
+                Tolerance_ft = task.Tolerance_mm / 304.8, 
+                MinSegmentLength_ft = task.MinSegmentLength_mm / 304.8,
+                Tolerance_deg = task.angleTolerance_deg};
 
             try
             {
@@ -103,6 +106,117 @@ namespace RevitMCPCommandSet.Services.Routing
                 throw;
             }
         }
+
+        /// <summary>
+        /// Infer waypoint(s) when task has none.
+        /// Rules:
+        /// - Pipe vs Pipe (or any MEPCurve): use midpoint of nearest connector pair
+        ///   (parallel, non-parallel, or colinear all fallback to nearest-connectors midpoint).
+        /// - FamilyInstance:
+        ///   * If both ends free OR both ends connected => throw (ambiguous).
+        ///   * If exactly one free connector => push forward a small offset along its direction.
+        /// - Mixed cases (Pipe/MEPCurve vs FamilyInstance): midpoint of nearest connectors.
+        /// </summary>
+        public static List<XYZ> InferWaypointsIfEmpty(
+            Document doc,
+            Element startEle,
+            Element endEle,
+            RoutingContext ctx
+        )
+        {
+            var result = new List<XYZ>();
+            var startCons = ConnectorUtils.GetConnectors(startEle).ToList();
+            var endCons = ConnectorUtils.GetConnectors(endEle).ToList();
+
+            if (!startCons.Any())
+                throw new InvalidOperationException($"Start element {startEle.Id} has no MEP connectors.");
+            if (!endCons.Any())
+                throw new InvalidOperationException($"End element {endEle.Id} has no MEP connectors.");
+
+            bool startIsFI = startEle is FamilyInstance;
+            bool endIsFI = endEle is FamilyInstance;
+            
+            // --- FamilyInstance validation rules ---
+            if (startIsFI)
+            {
+                int free = startCons.Count(c => !c.IsConnected);
+                if (free == 0 || free == startCons.Count)
+                    throw new InvalidOperationException("FamilyInstance(start) connectors are either all connected or all free; ambiguous.");
+            }
+            if (endIsFI)
+            {
+                int free = endCons.Count(c => !c.IsConnected);
+                if (free == 0 || free == endCons.Count)
+                    throw new InvalidOperationException("FamilyInstance(end) connectors are either all connected or all free; ambiguous.");
+            }
+
+
+
+            // Small forward offset (at least MinSegmentLength)
+            double forward_ft = ctx.MinSegmentLength_ft;
+
+            if (startEle is Pipe sPipe && endEle is Pipe ePipe)
+            {
+                var pair = NearestPair(startCons, endCons);
+                if (pair.a == null || pair.b == null)
+                    throw new InvalidOperationException("Failed to find nearest connectors.");
+
+                
+                bool isPorjS = PipeUtils.TryProjectPointOnPipe(startEle as Pipe, pair.b.Origin, out var projS, out _, clampToSegment: true);
+                bool isProjE = PipeUtils.TryProjectPointOnPipe(endEle as Pipe, pair.a.Origin, out var projE, out _, clampToSegment: true);
+                if (!isPorjS || !isProjE)
+                    throw new InvalidOperationException("Failed to find nearest connectors.");
+
+                var mid = Mid(projS, projE);
+                result.Add(mid);
+            }
+            else
+            {
+                // --- Case: FI with exactly one free-end => push forward along direction ---
+                bool startOneFree = startIsFI && startCons.Count(c => !c.IsConnected) == 1;
+                bool endOneFree = endIsFI && endCons.Count(c => !c.IsConnected) == 1;                  
+                if (startOneFree)
+                {
+                    var free = startCons.First(c => !c.IsConnected);
+                    var dir = ConnectorUtils.GetConnectorDirection(free);
+                    result.Add(free.Origin + dir.Multiply(forward_ft));
+                }
+                if (endOneFree)
+                {
+                    var free = endCons.First(c => !c.IsConnected);
+                    var dir = ConnectorUtils.GetConnectorDirection(free);
+                    result.Add(free.Origin + dir.Multiply(forward_ft));
+                }
+            }
+            return result;
+        }
+
+        // --- Helper: nearest connector pair across two elements ---
+        private static (Connector a, Connector b, double d) NearestPair(List<Connector> A, List<Connector> B)
+        {
+            Connector bestA = null, bestB = null;
+            double best = double.MaxValue;
+            foreach (var ca in A)
+                foreach (var cb in B)
+                {
+                    var d = ca.Origin.DistanceTo(cb.Origin);
+                    if (d < best)
+                    {
+                        best = d; bestA = ca; bestB = cb;
+                    }
+                }
+            return (bestA, bestB, best);
+        }
+
+        /// <summary>
+        /// Midpoint of two XYZ points.
+        /// </summary>
+        private static XYZ Mid(XYZ a, XYZ b) => new XYZ(
+            0.5 * (a.X + b.X),
+            0.5 * (a.Y + b.Y),
+            0.5 * (a.Z + b.Z)
+        );
+
         // --- Step5: 產生世界座標路徑
         public static List<XYZ> BuildPathWorldPoints(XYZ start, List<JZPoint> mids, XYZ end)
         {
@@ -140,7 +254,7 @@ namespace RevitMCPCommandSet.Services.Routing
                 }
 
                 WriteLog($"[CreateSegments] ConnectToEnd pref={routingPref}, EndKind={end.Kind}, EndAnchor={Pt(end.AnchorPoint)}");
-                SegmentBuilder.ConnectToTargetEnd(doc, ctx, currentConnector, end, created, tol_ft);
+                PipeUtils.TryCreateElbow(doc, currentConnector.Owner as Pipe, end.AnchorElement as Pipe, end.AnchorPoint);
 
                 WriteLog($"[CreateSegments][OUT] Created={string.Join(",", created.Select(x => x))}");
                 return created;
@@ -269,11 +383,6 @@ namespace RevitMCPCommandSet.Services.Routing
             var bbox = e?.get_BoundingBox(null);
             return (bbox != null) ? (bbox.Min + bbox.Max) * 0.5 : XYZ.Zero;
         }
-        public static XYZ GetLocationEnd(Pipe p, bool isStart)
-            => (p.Location as LocationCurve).Curve.GetEndPoint(isStart ? 0 : 1);
-
-        public static double ToMM(double ft) => ft * 304.8;
-
 
         // 路徑正規化：去重、去超短段、去共線中繼點；若全都重合 → 留單點
         public static List<XYZ> NormalizePathPoints(List<XYZ> pts, double tol_ft, double angTolDeg)
