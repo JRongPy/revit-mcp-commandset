@@ -20,6 +20,17 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
         private UIDocument _uiDoc => _uiApp.ActiveUIDocument;
         private Document _doc => _uiDoc.Document;
 
+        private List<RouteTask> _batchTasks;   // 批次任務（可為 null 表示單筆）
+        public AIResult<List<BatchRouteResult>> BatchResult { get; private set; } // 批次回傳
+
+        public class BatchRouteResult
+        {
+            public RouteTask Task { get; set; }
+            public bool Success { get; set; }
+            public string Message { get; set; }
+            public List<int> CreatedElementIds { get; set; } = new();
+        }
+
         private readonly ManualResetEvent _reset = new(false);
         public AIResult<List<int>> Result { get; private set; }
         private RouteTask _task;
@@ -38,6 +49,14 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
             catch { /* ignore permission errors */ }
         }
 
+        public void SetTasks(List<RouteTask> tasks)
+        {
+            _batchTasks = tasks ?? new List<RouteTask>();
+            _task = null; // 避免混用
+            _reset.Reset();
+            WriteLog($"[TASKS SET] Count={_batchTasks.Count}");
+        }
+
         public void SetTask(RouteTask task)
         {
             _task = task;
@@ -48,132 +67,176 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
         public void Execute(UIApplication uiapp)
         {
             _uiApp = uiapp;
-            var created = new List<ElementId>();
-            List<Element> unions = new List<Element>(); // 儲存所有新建的接頭元素，後續將其移除
 
             try
             {
-                WriteLog("===== EXECUTION START =====");
-                WriteLog($"Document: {_doc.Title}, Task: {SerializeTask(_task)}");
-
-                // 1) 解析起訖
-                var startEle = _doc.GetElement(new ElementId(_task.StartElementId));
-                var endEle = _doc.GetElement(new ElementId(_task.EndElementId));
-                if (startEle == null || endEle == null)
-                    throw new InvalidOperationException("起點或終點元素不存在");
-                WriteLog($"Start Element: {DescribeElement(startEle)}");
-                WriteLog($"End   Element: {DescribeElement(endEle)}");
-
-                // 2) 型別檢查
-                var startKind = Classify(startEle);
-                var endKind = Classify(endEle);
-
-                if (startKind == ElementKind.FamilyInstance)
-                    ConnectorUtils.EnsureHasConnectors((FamilyInstance)startEle);
-                if (endKind == ElementKind.FamilyInstance)
-                    ConnectorUtils.EnsureHasConnectors((FamilyInstance)endEle);
-
-                // 3) 生成配管資訊
-                var ctx = InferRoutingContext(_doc, startEle, endEle, _task);
-                WriteLog($"[CONTEXT] SystemTypeId={ctx.SystemTypeId}, PipeTypeId={ctx.PipeTypeId}, LevelId={ctx.LevelId}, Diameter={ctx.Diameter_ft * 304.8:F1} mm");
-
-                // 3.5) Auto-infer waypoint(s) when none are provided
-                if (_task.Waypoints == null || _task.Waypoints.Count == 0)
+                if (_batchTasks != null && _batchTasks.Count > 0)
                 {
-                    var wp = InferWaypointsIfEmpty(_doc, startEle, endEle, ctx);
-                    WriteLog($"[Waypoints] Inferred {wp.Count} waypoint(s).");                      
-                    if (wp.Count == 0)
-                        throw new InvalidOperationException("未提供路由途經點，且無法推論，請重新執行路由指令。");
-                    _task.Waypoints.AddRange(wp.Select(p => new JZPoint(p.X * 304.8, p.Y * 304.8, p.Z * 304.8)));
-                    WriteLog($"[Waypoints] Inferred:newTask: {SerializeTask(_task)}");
-
+                    ExecuteBatch();
+                    return;
                 }
 
-                using (var t = new Transaction(_doc, "Route Pipes by Waypoints"))
-                {
-                    t.Start();
-
-                    // 4) 建立錨點
-                    var startAnchor = new RoutingAnchor(_doc, startEle, _task, true, ctx);
-                    var endAnchor = new RoutingAnchor(_doc, endEle, _task, true, ctx);
-                    WriteLog($"startAnchor: {startAnchor.AnchorPoint}, endAnchor: {endAnchor.AnchorPoint}");
-                    if (startAnchor.CreatedElementIds.Count >0) created.AddRange(startAnchor.CreatedElementIds);
-                    if (endAnchor.CreatedElementIds.Count >0) created.AddRange(endAnchor.CreatedElementIds);
-
-                    // 5) 組合路徑
-                    var path = BuildPathWorldPoints(startAnchor.AnchorPoint, _task.Waypoints, endAnchor.AnchorPoint);
-                    WriteLog($"Path Points: {string.Join(" -> ", path.Select(p => p.ToString()))}");
-
-                    // 整理重複的路徑點
-                    path = NormalizePathPoints(path, ctx.Tolerance_ft, _task.angleTolerance_deg);
-                    WriteLog($"[CreateSegments][NormalizedPts] path point count: {path.Count}");
-
-                    // 6) 實際建模
-                    if (path.Count == 1)
-                    {
-                        // 起訖重合或都被吸收
-                        WriteLog("[CreateSegments] path.Count == 1 → 嘗試直接以接頭連接");
-                        
-
-                        try
-                        {
-                            var elementId = PipeUtils.TryCreateElbow(_doc, startAnchor.AnchorElement as Pipe, endAnchor.AnchorElement as Pipe, startAnchor.AnchorPoint);
-                            created.Add(elementId);
-                        }
-                        catch (Exception ex)
-                        {
-                            WriteLog($"[CreateSegments] [ERROR] {ex}");
-                        }
-                    }
-                    else if (path.Count == 2)
-                    {
-                        // 最常見：單段直連
-
-                        WriteLog($"[CreateSegments] path.Count == 2 → 直連 {Pt(path[0])} -> {Pt(path[1])}");
-                        var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(
-                            _doc, ctx, startAnchor.AnchorConnector, path[0], path[1],
-                            _task.MinSegmentLength_mm / 304.8, _task.Tolerance_mm / 304.8, created // 先建段
-                        );
-                        Pipe pipe = _doc.GetElement(segId) as Pipe;
-                        PipeUtils.TryCreateElbow(_doc, pipe, endAnchor.AnchorElement as Pipe, endAnchor.AnchorPoint);
-                        created.Add(segId);
-                    }
-                    else
-                    {
-                        var segCreated = CreateSegmentsAndFittings(
-                             _doc, ctx, startAnchor, endAnchor, path,
-                             _task.MinSegmentLength_mm / 304.8,
-                             _task.RoutingPreference, _task.Tolerance_mm / 304.8
-                         );
-                        created.AddRange(segCreated);
-                    }
-
-                    t.Commit();
-                }
-
-                WriteLog($"[SUCCESS] Created {created.Count} elements: {string.Join(", ", created)}");
-                Result = new AIResult<List<int>>
-                {
-                    Success = true,
-                    Message = $"路由完成，生成 {created.Count} 個元素（管段/彎頭/Tee/Takeoff）",
-                    Response = created.Select(id => id.IntegerValue).ToList()
-                };
+                // === 單筆流程（沿用你現有的 Execute 內容） ===
+                ExecuteSingle(_task);
             }
             catch (Exception ex)
             {
-                WriteLog($"[ERROR] {ex}");
+                WriteLog($"[Execute][ERROR] {ex}");
+                try
+                {
+                    TaskDialog.Show("RoutePipesByWaypoints", $"任務執行失敗：{ex.Message}");
+                }
+                catch { /* 可能 Revit UI 不可用時避免再崩 */ }
+
                 Result = new AIResult<List<int>>
                 {
                     Success = false,
-                    Message = $"路由失敗：{ex.Message}"
+                    Message = $"任務執行失敗：{ex.Message}",
+                    Response = new List<int>()
                 };
-                TaskDialog.Show("Route Pipes", Result.Message);
             }
             finally
             {
-                WriteLog("===== EXECUTION END =====\n");
-                _reset.Set();
+                _reset.Set(); // 確保事件解除阻塞
             }
+        }
+
+        private void ExecuteBatch()
+        {
+            var results = new List<BatchRouteResult>();
+            WriteLog("===== BATCH EXECUTION START =====");
+
+            foreach (var tsk in _batchTasks)
+            {
+                try
+                {
+                    var created = ExecuteSingle(tsk, suppressDialog: true); // 回傳建立的 ElementId 清單
+                    results.Add(new BatchRouteResult
+                    {
+                        Task = tsk,
+                        Success = true,
+                        Message = $"路由完成，生成 {created.Count} 個元素",
+                        CreatedElementIds = created.Select(id => id.IntegerValue).ToList()
+                    });
+                }
+                catch (Exception ex)
+                {
+                    WriteLog($"[BATCH ITEM ERROR] {ex}");
+                    results.Add(new BatchRouteResult
+                    {
+                        Task = tsk,
+                        Success = false,
+                        Message = $"路由失敗：{ex.Message}"
+                    });
+                }
+            }
+
+            BatchResult = new AIResult<List<BatchRouteResult>>
+            {
+                Success = results.All(r => r.Success),
+                Message = $"批次完成：成功 {results.Count(r => r.Success)}，失敗 {results.Count(r => !r.Success)}",
+                Response = results
+            };
+
+            WriteLog($"[BATCH SUMMARY] {BatchResult.Message}");
+            WriteLog("===== BATCH EXECUTION END =====\n");
+            _reset.Set();
+        }
+
+
+
+        private List<ElementId> ExecuteSingle(RouteTask task, bool suppressDialog = false)
+        {
+            var created = new List<ElementId>();
+            List<Element> unions = new(); // 若你後續還要清掉暫時接頭
+
+            WriteLog("===== EXECUTION START (Single) =====");
+            WriteLog($"Document: {_doc.Title}, Task: {SerializeTask(task)}");
+
+            // === 1) 解析起訖 ===
+            var startEle = _doc.GetElement(new ElementId(task.StartElementId));
+            var endEle = _doc.GetElement(new ElementId(task.EndElementId));
+            if (startEle == null || endEle == null)
+                throw new InvalidOperationException("起點或終點元素不存在");
+            WriteLog($"Start Element: {DescribeElement(startEle)}");
+            WriteLog($"End   Element: {DescribeElement(endEle)}");
+
+            var startKind = Classify(startEle);
+            var endKind = Classify(endEle);
+            if (startKind == ElementKind.FamilyInstance) ConnectorUtils.EnsureHasConnectors((FamilyInstance)startEle);
+            if (endKind == ElementKind.FamilyInstance) ConnectorUtils.EnsureHasConnectors((FamilyInstance)endEle);
+
+            var ctx = InferRoutingContext(_doc, startEle, endEle, task);
+            WriteLog($"[CONTEXT] SystemTypeId={ctx.SystemTypeId}, PipeTypeId={ctx.PipeTypeId}, LevelId={ctx.LevelId}, Diameter={ctx.Diameter_ft * 304.8:F1} mm");
+
+            // 3.5) 若沒 Waypoints，自動推論（你原本的行為）
+            if (task.Waypoints == null || task.Waypoints.Count == 0)
+            {
+                var wp = InferWaypointsIfEmpty(_doc, startEle, endEle, ctx);
+                WriteLog($"[Waypoints] Inferred {wp.Count} waypoint(s).");
+                if (wp.Count == 0)
+                    throw new InvalidOperationException("未提供路由途經點，且無法推論，請重新執行路由指令。");
+                task.Waypoints.AddRange(wp.Select(p => new JZPoint(p.X * 304.8, p.Y * 304.8, p.Z * 304.8)));
+                WriteLog($"[Waypoints] Inferred:newTask: {SerializeTask(task)}");
+            }
+
+            using (var t = new Transaction(_doc, "Route Pipes by Waypoints"))
+            {
+                t.Start();
+                var startAnchor = new RoutingAnchor(_doc, startEle, task, true, ctx);
+                var endAnchor = new RoutingAnchor(_doc, endEle, task, true, ctx);
+                if (startAnchor.CreatedElementIds.Count > 0) created.AddRange(startAnchor.CreatedElementIds);
+                if (endAnchor.CreatedElementIds.Count > 0) created.AddRange(endAnchor.CreatedElementIds);
+
+                var path = BuildPathWorldPoints(startAnchor.AnchorPoint, task.Waypoints, endAnchor.AnchorPoint);
+                path = NormalizePathPoints(path, ctx.Tolerance_ft, task.Tolerance_deg);
+
+                if (path.Count == 1)
+                {
+                    try
+                    {
+                        var eid = PipeUtils.TryCreateElbow(_doc, startAnchor.AnchorElement as Pipe, endAnchor.AnchorElement as Pipe, startAnchor.AnchorPoint);
+                        created.Add(eid);
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteLog($"[CreateSegments][ERROR] {ex}");
+                    }
+                }
+                else if (path.Count == 2)
+                {
+                    var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(
+                        _doc, ctx, startAnchor.AnchorConnector, path[0], path[1],
+                        task.MinSegmentLength_mm / 304.8, task.Tolerance_mm / 304.8, created
+                    );
+                    Pipe pipe = _doc.GetElement(segId) as Pipe;
+                    PipeUtils.TryCreateElbow(_doc, pipe, endAnchor.AnchorElement as Pipe, endAnchor.AnchorPoint);
+                    created.Add(segId);
+                }
+                else
+                {
+                    var segCreated = CreateSegmentsAndFittings(
+                        _doc, ctx, startAnchor, endAnchor, path,
+                        task.MinSegmentLength_mm / 304.8, task.RoutingPreference, task.Tolerance_mm / 304.8
+                    );
+                    created.AddRange(segCreated);
+                }
+
+                t.Commit();
+            }
+
+            WriteLog($"[SUCCESS] Created {created.Count} elements: {string.Join(", ", created)}");
+            WriteLog("===== EXECUTION END (Single) =====\n");
+
+            // 單筆模式時把 Result 也一起更新，保持舊 API 行為
+            Result = new AIResult<List<int>>
+            {
+                Success = true,
+                Message = $"路由完成，生成 {created.Count} 個元素（管段/彎頭/Tee/Takeoff）",
+                Response = created.Select(id => id.IntegerValue).ToList()
+            };
+
+            return created;
         }
 
         public bool WaitForCompletion(int timeoutMilliseconds = 120000) => _reset.WaitOne(timeoutMilliseconds);

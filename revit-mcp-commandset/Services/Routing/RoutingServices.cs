@@ -46,36 +46,34 @@ namespace RevitMCPCommandSet.Services.Routing
             var ctx = new RoutingContext { 
                 Tolerance_ft = task.Tolerance_mm / 304.8, 
                 MinSegmentLength_ft = task.MinSegmentLength_mm / 304.8,
-                Tolerance_deg = task.angleTolerance_deg};
+                Tolerance_deg = task.Tolerance_deg};
 
             try
             {
-                // PipeType & Level & Diameter（優先從已存在管件）
-                Pipe p = s as Pipe ?? e as Pipe ?? FindFirstNeighborPipe(doc, s, e);
+                // 從start 端取得資訊，不足再從 end 端補 
+                var startFreeConn = ConnectorUtils.GetSingleFreeEndConnector(s);
+                if (startFreeConn != null)
+                {
+                    // SystemType（優先以 start 端 free connector 所屬系統）
+                    try
+                    { 
+                        ctx.SystemTypeId = startFreeConn.MEPSystem?.GetTypeId(); 
+                    } 
+                    catch 
+                    { 
+                        ctx.SystemTypeId = FindSystemTypeIdFallback(doc); 
+                    }
+                }
+                ctx.LevelId = s.LevelId;
+                ctx.Diameter_ft = ConnectorUtils.TryGetConnectorDiameterFt(s);
+
+
+                Pipe p = s as Pipe ?? e as Pipe ?? FindConnectedPipe(s) ?? FindConnectedPipe(e);
                 WriteLog($"[InferCtx] NeighborPipe={(p != null ? p.Id.ToString() : "null")}");
 
                 if (p != null)
                 {
                     ctx.PipeTypeId = p.PipeType?.Id;
-                    ctx.LevelId = p.ReferenceLevel?.Id;
-                    if (p.Diameter > 0) ctx.Diameter_ft = p.Diameter;
-                }
-
-                // SystemType
-                if (p?.MEPSystem != null)
-                {
-                    ctx.SystemTypeId = p.MEPSystem.GetTypeId();
-                }
-                else
-                {
-                    ctx.SystemTypeId = FindSystemTypeIdFallback(doc);
-                }
-
-                // 若從 family 端取直徑
-                if (ctx.Diameter_ft <= 0)
-                {
-                    var d = ConnectorUtils.TryGetConnectorDiameterFt(s);
-                    if (d > 0) ctx.Diameter_ft = d;
                 }
 
                 // Level 補救
@@ -97,7 +95,7 @@ namespace RevitMCPCommandSet.Services.Routing
                 if (ctx.Diameter_ft <= 0)
                     throw new InvalidOperationException("無法推斷管徑");
 
-                WriteLog($"[InferCtx][OUT] SysType={ctx.SystemTypeId.IntegerValue}, PipeType={ctx.PipeTypeId.IntegerValue}, Level={ctx.LevelId.IntegerValue}, Dia={ctx.Diameter_ft * 304.8:F1}mm, Tol={ctx.Tolerance_ft * 304.8:F1}mm");
+                WriteLog($"[InferCtx][OUT] SysType={ctx.SystemTypeId}, PipeType={ctx.PipeTypeId}, Level={ctx.LevelId}, Dia={ctx.Diameter_ft * 304.8:F1}mm, Tol={ctx.Tolerance_ft * 304.8:F1}mm");
                 return ctx;
             }
             catch (Exception ex)
@@ -267,58 +265,65 @@ namespace RevitMCPCommandSet.Services.Routing
         }
 
         /// <summary>
-        /// 找出與起/訖其中之一「最近的」或「已連接的」第一支 Pipe。
-        /// 先從元素的 Connector 出發找相連管；不行再退而求其次找最近的管（幾何距離）。
+        /// 只沿著 Connector 網找第一支相連的 Pipe；超過 maxDepth 找不到就回傳 null。
+        /// - 僅查詢、不需 Transaction
+        /// - systemTypeId 可為 null 表示不過濾系統型別
+        /// - 會略過 Free connectors，並避免循環
         /// </summary>
-        public static Pipe FindFirstNeighborPipe(Document doc, Element s, Element e)
+        public static Pipe FindConnectedPipe(
+            Element start,
+            ElementId systemTypeId = null,
+            int maxDepth = 6
+        )
         {
-            // 1) 從 s 的 connectors 追相鄰管
-            var p = FindNeighborPipeFromElement(s);
-            if (p != null) return p;
+            if (start == null) return null;
 
-            // 2) 從 e 的 connectors 追相鄰管
-            p = FindNeighborPipeFromElement(e);
-            if (p != null) return p;
+            var q = new Queue<(Element el, int depth)>();
+            var visited = new HashSet<ElementId>();
+            if (start.Id != ElementId.InvalidElementId) visited.Add(start.Id);
+            q.Enqueue((start, 0));
 
-            // 3) 幾何最近（s / e → 最近的管）
-            var cand = new FilteredElementCollector(doc)
-                .OfClass(typeof(Pipe))
-                .Cast<Pipe>()
-                .ToList();
-
-            XYZ ps = GetOrigin(s);
-            XYZ pe = GetOrigin(e);
-            if (cand.Count == 0) return null;
-
-            Pipe nearestToS = cand.OrderBy(pi => DistanceToCurve(ps, pi)).FirstOrDefault();
-            Pipe nearestToE = cand.OrderBy(pi => DistanceToCurve(pe, pi)).FirstOrDefault();
-
-            // 選兩者中更近的
-            double ds = (nearestToS != null) ? DistanceToCurve(ps, nearestToS) : double.MaxValue;
-            double de = (nearestToE != null) ? DistanceToCurve(pe, nearestToE) : double.MaxValue;
-            return ds <= de ? nearestToS : nearestToE;
-
-            // local helpers
-            Pipe FindNeighborPipeFromElement(Element el)
+            while (q.Count > 0)
             {
+                var (el, depth) = q.Dequeue();
+                if (depth > maxDepth) continue;
+
                 foreach (var c in ConnectorUtils.GetConnectors(el))
                 {
+                    // 只在「已連接」的端點上擴張
+                    if (!c.IsConnected) continue;
+
                     foreach (Connector refc in c.AllRefs.Cast<Connector>())
                     {
-                        if (refc?.Owner is Pipe pp) return pp;
+                        if (refc == null) continue;
+                        var owner = refc.Owner;
+                        if (owner == null) continue;
+
+                        // 命中 Pipe
+                        if (owner is Pipe pipe)
+                        {
+                            if (systemTypeId == null || systemTypeId == ElementId.InvalidElementId)
+                                return pipe;
+
+                            var pid = pipe.get_Parameter(BuiltInParameter.RBS_PIPING_SYSTEM_TYPE_PARAM)?.AsElementId();
+                            if (pid == systemTypeId) return pipe;
+
+                            // 若系統不符，繼續擴張（因為可能跨配件後才接到目標系統）
+                        }
+
+                        // 非 Pipe：向外擴張，但避免循環
+                        if (!visited.Contains(owner.Id))
+                        {
+                            visited.Add(owner.Id);
+                            q.Enqueue((owner, depth + 1));
+                        }
                     }
                 }
-                return null;
             }
-            double DistanceToCurve(XYZ p0, Pipe pi)
-            {
-                var lc = pi.Location as LocationCurve;
-                var crv = lc?.Curve;
-                if (crv == null) return double.MaxValue;
-                var proj = crv.Project(p0);
-                return (proj == null) ? double.MaxValue : proj.Distance;
-            }
+            // 超過 maxDepth 或找不到
+            return null;
         }
+
         /// <summary>
         /// 從文件中找一個可用的 Piping 系統型別。優先：PipingSystemType；否則從現有 Pipe 的 MEPSystem 推回。
         /// </summary>

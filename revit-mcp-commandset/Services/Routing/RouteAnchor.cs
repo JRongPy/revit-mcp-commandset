@@ -50,7 +50,7 @@ namespace RevitMCPCommandSet.Services.Routing
             _ctx = ctx ?? throw new ArgumentNullException(nameof(ctx));
             _tol_ft = Math.Max(_ctx.Tolerance_ft, 1e-4);
             _task = task ?? throw new ArgumentNullException(nameof(task));
-            _tol_deg = task.angleTolerance_deg;
+            _tol_deg = task.Tolerance_deg;
             _minSegLen_ft = task.MinSegmentLength_mm / 304.8;
             _routingPref = task?.RoutingPreference ?? "Tee";
 

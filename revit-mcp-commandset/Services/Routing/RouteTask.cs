@@ -11,7 +11,7 @@ namespace RevitMCPCommandSet.Services.Routing
         public double MinSegmentLength_mm { get; set; } = 100;
         public string RoutingPreference { get; set; } = "Tee"; // or Takeoff
         public double Tolerance_mm { get; set; } = 10;
-        public double angleTolerance_deg { get; set; } = 5.0;
+        public double Tolerance_deg { get; set; } = 5.0;
         public OverrideDTO Override { get; set; }
 
         public class OverrideDTO
