@@ -11,31 +11,19 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Policy;
+using RevitMCPCommandSet.Utils;
 
 namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
 {
     [Transaction(TransactionMode.Manual)]
     public class TestRoutePipesByWaypointsCommand : IExternalCommand
     {
-        // =============== 簡易檔案日誌 ===============
-        private static readonly string _logDir = @"D:\MCP_Log";
-        private static readonly string _logFile = Path.Combine(_logDir, "RoutePipesByWaypoints.log");
-
-        private static void WriteLog(string msg)
-        {
-            try
-            {
-                if (!Directory.Exists(_logDir)) Directory.CreateDirectory(_logDir);
-                File.AppendAllText(_logFile, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} | {msg}\n");
-            }
-            catch { /* ignore IO/permission errors */ }
-        }
-
         public Result Execute(ExternalCommandData data, ref string message, ElementSet elements)
         {
             var uiapp = data.Application;
             var uidoc = uiapp.ActiveUIDocument;
             var doc = uidoc.Document;
+            var logger = new Logger();
 
             try
             {
@@ -75,6 +63,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                 else
                 {
                     TaskDialog.Show("Route Pipes", $"路由失敗：{result?.Message ?? "未知錯誤"}");
+                    logger.Info($"路由失敗：{result?.Message ?? "未知錯誤"}");
                     return Result.Failed;
                 }
             }
@@ -85,7 +74,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
             catch (Exception ex)
             {
                 message = ex.ToString();
-                WriteLog($"[Route Pipes Test - Exception] {ex}");
+                logger.Info($"[Route Pipes Test - Exception] {ex}");
                 TaskDialog.Show("Route Pipes Test - Exception", message);
                 return Result.Failed;
             }

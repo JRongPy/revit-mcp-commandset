@@ -1,23 +1,21 @@
-﻿using System;
+﻿using Autodesk.Revit.DB;
+using Autodesk.Revit.UI;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Newtonsoft.Json;
+using RevitMCPSDK.API.Interfaces;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Loader;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
-
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
-
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-
-using Newtonsoft.Json;
-using RevitMCPSDK.API.Interfaces;
+using System.Threading;
+using System.Threading.Tasks;
+using static Microsoft.CodeAnalysis.CSharp.SyntaxTokenParser;
 
 namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
 {
@@ -345,17 +343,26 @@ namespace AIGeneratedCode
     // ============================
     public class ExecuteCodeEventHandler : IExternalEventHandler, IWaitableExternalEventHandler
     {
-        private string _generatedCode;
-        private object[] _executionParameters;
+        private string _code;
+        private object[] _parameters;
+        private bool _autoTransaction = true;                  // 預設開啟
+        private string _transactionName = "Execute AI code";   // 預設交易名稱
 
         public ExecutionResultInfo ResultInfo { get; private set; }
         public bool TaskCompleted { get; private set; }
         private readonly ManualResetEvent _resetEvent = new ManualResetEvent(false);
 
-        public void SetExecutionParameters(string code, object[] parameters = null)
+        public void SetExecutionParameters(
+            string code, 
+            object[] parameters = null,
+            bool? autoTransaction = null,
+            string transactionName = null)
         {
-            _generatedCode = code;
-            _executionParameters = parameters ?? Array.Empty<object>();
+            _code = code ?? throw new ArgumentNullException(nameof(code));
+            _parameters = parameters ?? Array.Empty<object>();
+            if (autoTransaction.HasValue) _autoTransaction = autoTransaction.Value;
+            if (!string.IsNullOrWhiteSpace(transactionName)) _transactionName = transactionName;
+            
             TaskCompleted = false;
             _resetEvent.Reset();
         }
@@ -372,22 +379,44 @@ namespace AIGeneratedCode
 
                 var doc = app.ActiveUIDocument.Document;
                 ResultInfo = new ExecutionResultInfo();
+                object result;
 
-                using (var transaction = new Transaction(doc, "Execute AI code"))
+                if (_autoTransaction)
                 {
-                    transaction.Start();
-                    var fho = transaction.GetFailureHandlingOptions();
-                    fho.SetFailuresPreprocessor(new DismissAllFailures());
-                    transaction.SetFailureHandlingOptions(fho);
+                    if (doc.IsModifiable)
+                    {
+                        // 外層已有 Transaction：使用 SubTransaction
+                        using (var sub = new SubTransaction(doc))
+                        {
+                            sub.Start();
+                            result = MiniScriptEngine.Run(_code, doc, _parameters);
+                            sub.Commit();
+                        }
+                    }
+                    else
+                    {
+                        // 無外層 Transaction：自行開主 Transaction
+                        using (var tx = new Transaction(doc, _transactionName))
+                        {
+                            tx.Start();
+                            var fho = tx.GetFailureHandlingOptions();
+                            fho.SetFailuresPreprocessor(new DismissAllFailures());
+                            tx.SetFailureHandlingOptions(fho);
 
-                    // 呼叫優化版引擎（Roslyn + Collectible ALC + 智能快取）
-                    var result = MiniScriptEngine.Run(_generatedCode, doc, _executionParameters);
+                            result = MiniScriptEngine.Run(_code, doc, _parameters);
 
-                    transaction.Commit();
-
-                    ResultInfo.Success = true;
-                    ResultInfo.Result = JsonConvert.SerializeObject(result);
+                            tx.Commit();
+                        }
+                    }
                 }
+                else
+                {
+                    // 不包交易（僅限查詢或呼叫已自帶交易的工具）
+                    result = MiniScriptEngine.Run(_code, doc, _parameters);
+                }
+                ResultInfo.Success = true;
+                ResultInfo.Result = JsonConvert.SerializeObject(result);
+
             }
             catch (Exception ex)
             {

@@ -3,27 +3,16 @@ using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Mechanical;
 using Autodesk.Revit.DB.Plumbing;
 using RevitMCPCommandSet.Models.Common;
+using RevitMCPCommandSet.Utils;
 using RevitMCPCommandSet.Utils.Routing;
+using RevitMCPSDK.API.Interfaces;
 using System.IO;
 
 namespace RevitMCPCommandSet.Services.Routing
 {
     public static class RoutingServices
     {
-        // =============== 簡易檔案日誌 ===============
-        private static readonly string _logDir = @"D:\MCP_Log";
-        private static readonly string _logFile = Path.Combine(_logDir, "RoutePipesByWaypoints.log");
-
-        private static void WriteLog(string msg)
-        {
-            try
-            {
-                if (!Directory.Exists(_logDir)) Directory.CreateDirectory(_logDir);
-                File.AppendAllText(_logFile, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} | {msg}\n");
-            }
-            catch { /* ignore IO/permission errors */ }
-        }
-
+       private static readonly Logger _logger = new Logger();
         public static string Pt(XYZ p) => p == null ? "null" : $"({p.X:F3},{p.Y:F3},{p.Z:F3})";
 
         // ================= 型別定義 ========================
@@ -35,14 +24,14 @@ namespace RevitMCPCommandSet.Services.Routing
             var kind = (e is Pipe) ? ElementKind.Pipe :
                        (e is FamilyInstance) ? ElementKind.FamilyInstance :
                        ElementKind.Other;
-            WriteLog($"[Classify] {e?.Id} -> {kind}");
+            _logger.Info($"[Classify] {e?.Id} -> {kind}");
             return kind;
         }
 
         // --- Step3: 推斷/取得必要資訊
         public static RoutingContext InferRoutingContext(Document doc, Element s, Element e, RouteTask task)
         {
-            WriteLog($"[InferCtx][IN] S={s?.Id}, E={e?.Id}, Override?={(task?.Override != null)}");
+            _logger.Info($"[InferCtx][IN] S={s?.Id}, E={e?.Id}, Override?={(task?.Override != null)}");
             var ctx = new RoutingContext { 
                 Tolerance_ft = task.Tolerance_mm / 304.8, 
                 MinSegmentLength_ft = task.MinSegmentLength_mm / 304.8,
@@ -69,7 +58,7 @@ namespace RevitMCPCommandSet.Services.Routing
 
 
                 Pipe p = s as Pipe ?? e as Pipe ?? FindConnectedPipe(s) ?? FindConnectedPipe(e);
-                WriteLog($"[InferCtx] NeighborPipe={(p != null ? p.Id.ToString() : "null")}");
+                _logger.Info($"[InferCtx] NeighborPipe={(p != null ? p.Id.ToString() : "null")}");
 
                 if (p != null)
                 {
@@ -95,12 +84,12 @@ namespace RevitMCPCommandSet.Services.Routing
                 if (ctx.Diameter_ft <= 0)
                     throw new InvalidOperationException("無法推斷管徑");
 
-                WriteLog($"[InferCtx][OUT] SysType={ctx.SystemTypeId}, PipeType={ctx.PipeTypeId}, Level={ctx.LevelId}, Dia={ctx.Diameter_ft * 304.8:F1}mm, Tol={ctx.Tolerance_ft * 304.8:F1}mm");
+                _logger.Info($"[InferCtx][OUT] SysType={ctx.SystemTypeId}, PipeType={ctx.PipeTypeId}, Level={ctx.LevelId}, Dia={ctx.Diameter_ft * 304.8:F1}mm, Tol={ctx.Tolerance_ft * 304.8:F1}mm");
                 return ctx;
             }
             catch (Exception ex)
             {
-                WriteLog($"[InferCtx][ERR] {ex}");
+                _logger.Error($"[InferCtx][ERR] {ex}");
                 throw;
             }
         }
@@ -221,7 +210,7 @@ namespace RevitMCPCommandSet.Services.Routing
             var pts = new List<XYZ> { start };
             pts.AddRange(mids.Select(m => new XYZ(m.X / 304.8, m.Y / 304.8, m.Z / 304.8)));
             pts.Add(end);
-            WriteLog($"[BuildPath] {string.Join(" -> ", pts.Select(Pt))}");
+            _logger.Info($"[BuildPath][Oirgin] {string.Join(" -> ", pts.Select(Pt))}");
             return pts;
         }
 
@@ -232,7 +221,7 @@ namespace RevitMCPCommandSet.Services.Routing
             Document doc, RoutingContext ctx, RoutingAnchor start, RoutingAnchor end,
             List<XYZ> pathPts, double minSegmentLen_ft, string routingPref, double tol_ft)
         {
-            WriteLog($"[CreateSegments][IN] pts={pathPts?.Count ?? 0}, minLen={minSegmentLen_ft * 304.8:F1}mm, pref={routingPref}, tol={tol_ft * 304.8:F1}mm");
+            _logger.Info($"[CreateSegments][IN] pts={pathPts?.Count ?? 0}, minLen={minSegmentLen_ft * 304.8:F1}mm, pref={routingPref}, tol={tol_ft * 304.8:F1}mm");
             var created = new List<ElementId>();
             var currentConnector = start.AnchorConnector;
 
@@ -242,24 +231,24 @@ namespace RevitMCPCommandSet.Services.Routing
                 {
                     var from = (i == 1) ? start.AnchorPoint : pathPts[i - 1];
                     var to = pathPts[i];
-                    WriteLog($"[CreateSegments] Seg#{i} {Pt(from)} -> {Pt(to)}");
+                    _logger.Info($"[CreateSegments] Seg#{i} {Pt(from)} -> {Pt(to)}");
 
                     var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(doc, ctx, currentConnector, from, to, minSegmentLen_ft, tol_ft, created);
-                    WriteLog($"[CreateSegments] Seg#{i} LastPipeId={segId}");
+                    _logger.Info($"[CreateSegments] Seg#{i} LastPipeId={segId}");
                     Pipe seg = doc.GetElement(segId) as Pipe;
                     currentConnector = ConnectorUtils.GetNearConnector(seg, to);
-                    WriteLog($"[CreateSegments] Seg#{i} NextConn@{Pt(currentConnector?.Origin)}");
+                    _logger.Info($"[CreateSegments] Seg#{i} NextConn@{Pt(currentConnector?.Origin)}");
                 }
 
-                WriteLog($"[CreateSegments] ConnectToEnd pref={routingPref}, EndKind={end.Kind}, EndAnchor={Pt(end.AnchorPoint)}");
+                _logger.Info($"[CreateSegments] ConnectToEnd pref={routingPref}, EndKind={end.Kind}, EndAnchor={Pt(end.AnchorPoint)}");
                 PipeUtils.TryCreateElbow(doc, currentConnector.Owner as Pipe, end.AnchorElement as Pipe, end.AnchorPoint);
 
-                WriteLog($"[CreateSegments][OUT] Created={string.Join(",", created.Select(x => x))}");
+                _logger.Info($"[CreateSegments][OUT] Created={string.Join(",", created.Select(x => x))}");
                 return created;
             }
             catch (Exception ex)
             {
-                WriteLog($"[CreateSegments][ERR] {ex}");
+                _logger.Info($"[CreateSegments][ERR] {ex}");
                 throw;
             }
         }
@@ -451,19 +440,29 @@ namespace RevitMCPCommandSet.Services.Routing
 
             // 5) 如果處理完只剩 1 點或 2 點即已充分；2 點相等再壓成 1 點
             if (result.Count == 2 && NearlyEqual(result[0], result[1], tol_ft))
-                return new List<XYZ> { result[0] };
-
+                return new List<XYZ> { result[0] };             
             return result;
 
-            // ==== helpers ====
-            static bool NearlyEqual(XYZ p1, XYZ p2, double tol) => p1.DistanceTo(p2) <= tol;
-            static bool IsZero(XYZ v, double tol) => v.GetLength() <= tol * 0.5; // 更嚴一點避免浮點誤差累積
-            static bool AllNearEqual(List<XYZ> list, XYZ refPt, double tol)
-            {
-                foreach (var p in list)
-                    if (p.DistanceTo(refPt) > tol) return false;
-                return true;
-            }
         }
+
+        /// <summary>
+        /// 把與起點/終點重疊（在 tol_mm 以內）的 waypoint 移除
+        /// </summary>
+        public static void RemoveNearEndpointsInPlace(List<XYZ> ftPts, XYZ startFt, XYZ endFt, double tol_ft)
+        {
+            if (ftPts == null || ftPts.Count == 0) return;
+            ftPts.RemoveAll(p => NearlyEqual(p, startFt, tol_ft) || NearlyEqual(p, endFt, tol_ft));
+        }
+
+        //========== helpers =============
+        static bool NearlyEqual(XYZ p1, XYZ p2, double tol) => p1.DistanceTo(p2) <= tol;
+        static bool IsZero(XYZ v, double tol) => v.GetLength() <= tol * 0.5; // 更嚴一點避免浮點誤差累積
+        static bool AllNearEqual(List<XYZ> list, XYZ refPt, double tol)
+        {
+            foreach (var p in list)
+                if (p.DistanceTo(refPt) > tol) return false;
+            return true;
+        }
+
     }
 }
