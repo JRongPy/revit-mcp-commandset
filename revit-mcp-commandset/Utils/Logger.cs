@@ -70,14 +70,9 @@ namespace RevitMCPCommandSet.Utils
         public static string GetLogsDirectoryPath()
         {
             string appDataDirectory;
-            try 
-            {
-                appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            }
-            catch
-            {
-                appDataDirectory = @"D:\MCP_Log";
-            }
+            appDataDirectory = @"D:\MCP_Log";
+            //appDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+
             string logsDirectory = Path.Combine(appDataDirectory, "RevitMCPCommandSet", "Logs");
             EnsureDirectoryExists(logsDirectory);
             return logsDirectory;

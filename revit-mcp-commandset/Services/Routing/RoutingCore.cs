@@ -74,7 +74,7 @@ namespace RevitMCPCommandSet.Services.Routing
             }
 
             var startAnchor = new RoutingAnchor(doc, startEle, task, true, ctx);
-            var endAnchor = new RoutingAnchor(doc, endEle, task, true, ctx);
+            var endAnchor = new RoutingAnchor(doc, endEle, task, false, ctx);
             if (startAnchor.CreatedElementIds.Count > 0) created.AddRange(startAnchor.CreatedElementIds);
             if (endAnchor.CreatedElementIds.Count > 0) created.AddRange(endAnchor.CreatedElementIds);
 
