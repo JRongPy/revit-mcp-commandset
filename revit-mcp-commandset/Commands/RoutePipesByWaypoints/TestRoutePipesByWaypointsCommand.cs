@@ -38,9 +38,9 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                     StartElementId = startEl.Id.IntegerValue,
                     EndElementId = endEl.Id.IntegerValue,
                     Waypoints = new List<JZPoint> {},
-                    MinSegmentLength_mm = 1500,
+                    MinSegmentLengthMm = 1500,
                     RoutingPreference = "Tee",
-                    Tolerance_mm = 10
+                    ToleranceMm = 10
                 };                   
                 if (false)
                 {

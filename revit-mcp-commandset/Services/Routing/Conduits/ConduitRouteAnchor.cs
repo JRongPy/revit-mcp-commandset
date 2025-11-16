@@ -2,190 +2,327 @@
 using System.Collections.Generic;
 using System.Linq;
 using Autodesk.Revit.DB;
-using Autodesk.Revit.DB.Plumbing;
-using Autodesk.Revit.DB.Mechanical;
-using RevitMCPCommandSet.Models.Common;
-using static RevitMCPCommandSet.Services.Routing.RoutingServices;
-using System.Threading.Tasks;
-using System.Collections;
-using RevitMCPCommandSet.Utils.Routing;
 using Autodesk.Revit.DB.Electrical;
-using RevitMCPSDK.API.Interfaces;
+using Autodesk.Revit.DB.Mechanical;
+using Autodesk.Revit.DB.Plumbing;
+using RevitMCPCommandSet.Models.Common;
+using RevitMCPCommandSet.Services.Routing;
+using RevitMCPCommandSet.Utils.Routing;
 
 namespace RevitMCPCommandSet.Services.Routing.Conduits
 {
     /// <summary>
-    /// Conduit 版本的 Anchor：
-    /// 目前只包住「HostElement + AnchorConduit + AnchorConnector」，
-    /// 未來可以再加方向向量、直角首段等資訊。
+    /// ConduitRoutingAnchor：
+    /// 將 tray / endpoint / 既有 conduit 正規化成
+    /// 「後續路由可以直接接上的 conduit 端點」。
+    ///
+    /// 設計目標是跟 RoutingAnchor 結構類似：
+    /// - HostElement：輸入的元素 (Tray / Panel / Conduit / ...）
+    /// - AnchorElement：實際用來接後續路徑的 conduit
+    /// - AnchorConnector / AnchorPoint：實際路由起點 / 終點
+    /// - CreatedElementIds：在建 Anchor 時新增的元素列表
     /// </summary>
-    public class ConduitRouteAnchor
+    public class ConduitRoutingAnchor
     {
-        public Element HostElement { get; }
-        public Conduit AnchorConduit { get; }
-        public Connector AnchorConnector { get; }
-        public ConduitAnchorKind Kind { get; }
+        public enum HostKind
+        {
+            CableTray,
+            Conduit,
+            FamilyInstance,
+            Other
+        }
 
-        public XYZ AnchorPoint => AnchorConnector?.Origin ?? XYZ.Zero;
+        public Connector AnchorConnector { get; private set; }
+        public XYZ AnchorPoint { get; private set; }
+        public Element AnchorElement { get; private set; }
 
-        public ConduitRouteAnchor(
+        /// <summary>使用者傳進來的原始 host（Tray / Panel / Conduit / ...）</summary>
+        public Element HostElement { get; private set; }
+        public HostKind Kind { get; private set; }
+
+        /// <summary>建 Anchor 過程中額外產生的元素（stub conduit 等）</summary>
+        public List<ElementId> CreatedElementIds { get; } = new List<ElementId>();
+
+        // 這裡直接沿用 RoutingContext，PipeTypeId 當作 ConduitTypeId
+        public ElementId ConduitTypeId { get; }
+        public ElementId LevelId { get; }
+        public double Diameter_ft { get; }
+
+        private readonly Document _doc;
+        private readonly ConduitRoutingContext _ctx;
+        private readonly ConduitRouteTask _task;
+
+        private readonly double _tol_ft;
+        private readonly double _tol_deg;
+        private readonly double _minSegLen_ft;
+
+        public ConduitRoutingAnchor(
+            Document doc,
             Element host,
-            Conduit conduit,
-            Connector connector,
-            ConduitAnchorKind kind)
+            ConduitRouteTask task,
+            bool isStart,
+            ConduitRoutingContext ctx)
         {
+            _doc = doc ?? throw new ArgumentNullException(nameof(doc));
+            _ctx = ctx ?? throw new ArgumentNullException(nameof(ctx));
+            _task = task ?? throw new ArgumentNullException(nameof(task));
+
             HostElement = host ?? throw new ArgumentNullException(nameof(host));
-            AnchorConduit = conduit ?? throw new ArgumentNullException(nameof(conduit));
-            AnchorConnector = connector ?? throw new ArgumentNullException(nameof(connector));
-            Kind = kind;
-        }
-    }
+            Kind = ClassifyHost(HostElement);
 
-    /// <summary>
-    /// 專門負責從 tray / endpoint 產生「第一段 Conduit Anchor」的 resolver。
-    /// ConduitRoutingCore 只要呼叫這裡，不用管細節。
-    /// </summary>
-    public static class ConduitAnchorResolver
-    {
-        // 目前先用固定 300mm 作為 anchor 段長度，可之後用參數/RouteTask 控制
-        private const double AnchorLengthMm = 300.0;
+            ConduitTypeId = ctx.ConduitTypeId;   // 先共用 PipeTypeId 當 conduit type
+            LevelId = ctx.LevelId;
+            Diameter_ft = ctx.DiameterFt / 304.8;
 
-        public static ConduitRouteAnchor CreateTrayAnchor(
-            Document doc,
-            Element tray,
-            Element endpoint,
-            ILogger logger)
-        {
-            if (doc == null) throw new ArgumentNullException(nameof(doc));
-            if (tray == null) throw new ArgumentNullException(nameof(tray));
-            if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
+            _tol_ft = Math.Max(ctx.ToleranceFt, 1e-4);
+            _tol_deg = task.ToleranceDeg;
+            _minSegLen_ft = task.MinSegmentLengthMm / 304.8;
 
-            var origin = GetRepresentativePoint(tray);
-            var target = GetRepresentativePoint(endpoint);
-            var dir = (target - origin);
-            if (dir.IsZeroLength())
-                dir = XYZ.BasisX;
-            dir = dir.Normalize();
-
-            var lengthFt = AnchorLengthMm / 304.8;
-            var p0 = origin;
-            var p1 = origin + dir * lengthFt;
-
-            var (conduitTypeId, levelId) =
-                ResolveConduitTypeAndLevel(doc, tray, endpoint, logger);
-
-            var conduit = Conduit.Create(doc, conduitTypeId, p0, p1, levelId);
-
-            var conn = ConnectorUtils.GetNearConnector(conduit, target);
-            if (conn == null)
-                throw new InvalidOperationException("Tray Anchor 建立成功，但無法取得 Connector。");
-
-            logger.Info($"[TrayAnchor] Conduit={conduit.Id.IntegerValue}, Connector at {conn.Origin}");
-
-            return new ConduitRouteAnchor(tray, conduit, conn, ConduitAnchorKind.Tray);
+            BuildAnchorElement(isStart);
         }
 
-        public static ConduitRouteAnchor CreateEndpointAnchor(
-            Document doc,
-            Element tray,
-            Element endpoint,
-            ILogger logger)
+        // ---------------------------------------------------------------------
+        // 公開 helper：若後面有移動 anchorPoint，可呼叫刷新 connector
+        // ---------------------------------------------------------------------
+        public Connector RefreshConnector()
         {
-            if (doc == null) throw new ArgumentNullException(nameof(doc));
-            if (tray == null) throw new ArgumentNullException(nameof(tray));
-            if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
+            if (AnchorElement is Conduit conduit)
+            {
+                var conns = ConnectorUtils.GetConnectors(conduit);
+                AnchorConnector = conns?
+                    .OrderBy(c => c.Origin.DistanceTo(AnchorPoint))
+                    .FirstOrDefault();
+            }
+            else if (AnchorElement is FamilyInstance fi)
+            {
+                AnchorConnector = ConnectorUtils.GetNearConnector(fi, AnchorPoint);
+            }
 
-            var origin = GetRepresentativePoint(endpoint);
-            var target = GetRepresentativePoint(tray);
-            var dir = (target - origin);
-            if (dir.IsZeroLength())
-                dir = XYZ.BasisX;
-            dir = dir.Normalize();
-
-            var lengthFt = AnchorLengthMm / 304.8;
-            var p0 = origin;
-            var p1 = origin + dir * lengthFt;
-
-            var (conduitTypeId, levelId) =
-                ResolveConduitTypeAndLevel(doc, endpoint, tray, logger);
-
-            var conduit = Conduit.Create(doc, conduitTypeId, p0, p1, levelId);
-
-            var conn = ConnectorUtils.GetNearConnector(conduit, target);
-            if (conn == null)
-                throw new InvalidOperationException("Endpoint Anchor 建立成功，但無法取得 Connector。");
-
-            logger.Info($"[EndpointAnchor] Conduit={conduit.Id.IntegerValue}, Connector at {conn.Origin}");
-
-            return new ConduitRouteAnchor(endpoint, conduit, conn, ConduitAnchorKind.Endpoint);
+            return AnchorConnector;
         }
 
-        // ---- helpers ----
-
-        private static (ElementId conduitTypeId, ElementId levelId)
-            ResolveConduitTypeAndLevel(Document doc, Element primary, Element secondary, ILogger logger)
+        // ---------------------------------------------------------------------
+        // 內部主流程
+        // ---------------------------------------------------------------------
+        private void BuildAnchorElement(bool isStart)
         {
-            // 1) ConduitType
-            var conduitType = new FilteredElementCollector(doc)
-                .OfClass(typeof(ConduitType))
-                .Cast<ConduitType>()
+            var targetPoint = ComputeTargetPoint(_task, isStart);
+
+            switch (Kind)
+            {
+                case HostKind.CableTray:
+                    ResolveOnTray(targetPoint);
+                    break;
+
+                case HostKind.Conduit:
+                    ResolveOnConduit(targetPoint);
+                    break;
+
+                case HostKind.FamilyInstance:
+                    ResolveOnFamily(targetPoint);
+                    break;
+
+                default:
+                    throw new InvalidOperationException(
+                        $"ConduitRoutingAnchor：不支援的 HostElement 型別：{HostElement?.GetType().Name}");
+            }
+
+            if (AnchorConnector == null)
+            {
+                throw new InvalidOperationException(
+                    "ConduitRoutingAnchor 無法取得有效的 AnchorConnector。");
+            }
+
+            AnchorPoint = AnchorConnector.Origin;
+        }
+
+        // ---------------------------------------------------------------------
+        // Host = CableTray：從 tray 上某點「長出」第一段 conduit（不直接跟 tray 連接）
+        // ---------------------------------------------------------------------
+        private void ResolveOnTray(XYZ targetPoint)
+        {
+            var tray = HostElement as CableTray
+                       ?? throw new InvalidOperationException("HostElement 不是 CableTray");
+
+            var lc = tray.Location as LocationCurve
+                      ?? throw new InvalidOperationException("CableTray 無 LocationCurve");
+            var crv = lc.Curve
+                      ?? throw new InvalidOperationException("CableTray LocationCurve 無效");
+
+            // 先把目標點投影到 tray 中心線上，當作起點附近
+            var proj = crv.Project(targetPoint);
+            var pOnTray = proj?.XYZPoint ?? GetCenterOfElement(tray);
+
+            // 往目標方向拉出一段 stub conduit
+            var toTarget = targetPoint - pOnTray;
+            XYZ dir;
+
+            if (toTarget.IsZeroLength())
+            {
+                // 如果目標點剛好壓在 tray 上，就用 tray 曲線方向當方向
+                if (crv is Line line)
+                    dir = (line.Direction).Normalize();
+                else
+                    dir = XYZ.BasisY;
+            }
+            else
+            {
+                dir = toTarget.Normalize();
+            }
+
+            var pStart = pOnTray;
+            var pEnd = pStart + dir * _minSegLen_ft;
+
+            var conduit = Conduit.Create(_doc, ConduitTypeId, pStart, pEnd, LevelId);
+            SetConduitDiameter(conduit, Diameter_ft);
+            CreatedElementIds.Add(conduit.Id);
+
+            AnchorElement = conduit;
+            AnchorConnector = ConnectorUtils
+                .GetConnectors(conduit)
+                .OrderBy(c => c.Origin.DistanceTo(targetPoint))
+                .FirstOrDefault();
+        }
+
+        // ---------------------------------------------------------------------
+        // Host = 既有 Conduit：直接用「最靠近 target 的端點 connector」當 Anchor
+        // 目前先不在中段打 Tee / Bend，後續若要支援再補 SegmentBuilder for conduit。
+        // ---------------------------------------------------------------------
+        private void ResolveOnConduit(XYZ targetPoint)
+        {
+            var conduit = HostElement as Conduit
+                          ?? throw new InvalidOperationException("HostElement 不是 Conduit");
+
+            var conns = ConnectorUtils.GetConnectors(conduit)?.ToList();
+            if (conns == null || conns.Count == 0)
+                throw new InvalidOperationException($"Conduit {conduit.Id} 無任何 Connector");
+
+            AnchorElement = conduit;
+            AnchorConnector = conns
+                .OrderBy(c => c.Origin.DistanceTo(targetPoint))
+                .First();
+        }
+
+        // ---------------------------------------------------------------------
+        // Host = FamilyInstance（panel / box / 機具等）：
+        // 從最近的 connector 延伸一小段 conduit，作為後續路由 Anchor。
+        // ---------------------------------------------------------------------
+        private void ResolveOnFamily(XYZ targetPoint)
+        {
+            var fi = HostElement as FamilyInstance
+                     ?? throw new InvalidOperationException("HostElement 並非 FamilyInstance");
+
+            var cons = ConnectorUtils.GetConnectors(fi)?.ToList();
+            if (cons == null || cons.Count == 0)
+                throw new InvalidOperationException($"Family {fi.Id} 無任何 Connector");
+
+            var fiConnector = cons
+                .OrderBy(c => c.Origin.DistanceTo(targetPoint))
+                .First();
+
+            var origin = fiConnector.Origin;
+            var toTarget = targetPoint - origin;
+            if (toTarget.IsZeroLength())
+            {
+                // 如果 target 跟 connector 共點，就改用 connector 的 Z 方向
+                toTarget = fiConnector.CoordinateSystem?.BasisZ ?? XYZ.BasisZ;
+            }
+
+            var connDir = fiConnector.CoordinateSystem?.BasisZ?.Normalize() ?? XYZ.BasisZ;
+            var tgtDir = toTarget.Normalize();
+
+            double dot = connDir.DotProduct(tgtDir);
+            double cosTol = Math.Cos(_tol_deg * Math.PI / 180.0);
+            bool aligned = dot >= cosTol;
+
+            XYZ pStart = origin;
+            XYZ pEnd;
+
+            if (aligned)
+            {
+                var len = origin.DistanceTo(targetPoint);
+                pEnd = (len < _minSegLen_ft)
+                    ? origin + connDir * _minSegLen_ft
+                    : targetPoint;
+            }
+            else
+            {
+                // 不同向 → 先沿 connector 方向拉出一段最小長度，之後再交給路由器轉折
+                pEnd = origin + connDir * _minSegLen_ft;
+            }
+
+            var conduit = Conduit.Create(_doc, ConduitTypeId, pStart, pEnd, LevelId);
+            SetConduitDiameter(conduit, Diameter_ft);
+            CreatedElementIds.Add(conduit.Id);
+
+            AnchorElement = conduit;
+            AnchorConnector = ConnectorUtils
+                .GetConnectors(conduit)
+                .OrderBy(c => c.Origin.DistanceTo(targetPoint))
                 .FirstOrDefault();
 
-            if (conduitType == null)
-                throw new InvalidOperationException("專案中找不到任何 ConduitType，無法建立 Conduit。");
-
-
-            // 3) Level：
-            //    先試 primary，失敗再用 secondary，最後抓任一 Level 當 fallback。
-            ElementId levelId = TryGetLevelId(primary)
-                                ?? TryGetLevelId(secondary)
-                                ?? new FilteredElementCollector(doc)
-                                        .OfClass(typeof(Level))
-                                        .Cast<Level>()
-                                        .FirstOrDefault()?.Id
-                                ?? ElementId.InvalidElementId;
-
-            if (levelId == ElementId.InvalidElementId)
-                throw new InvalidOperationException("無法判斷 Conduit 的 Level。");
-
-            logger.Info($"[ConduitType] ConduitType={conduitType.Id}, Level={levelId}");
-
-            return (conduitType.Id, levelId);
+            if (AnchorConnector == null)
+                throw new InvalidOperationException("ResolveOnFamily 失敗：無法取得 stub conduit 的 Connector");
         }
 
-        private static ElementId TryGetLevelId(Element e)
+        // ---------------------------------------------------------------------
+        // 目標點推導：先走 Waypoints，沒有時用「另一端元素中心」
+        // （這邊先做簡版，之後要像 RoutingAnchor 那麼完整再一起升級）
+        // ---------------------------------------------------------------------
+        private XYZ ComputeTargetPoint(ConduitRouteTask task, bool isStart)
         {
-            if (e == null) return null;
+            // 1) 有 Waypoints 時：
+            if (task?.Waypoints != null && task.Waypoints.Count > 0)
+            {
+                JZPoint p = isStart ? task.Waypoints.First() : task.Waypoints.Last();
+                return new XYZ(p.X / 304.8, p.Y / 304.8, p.Z / 304.8);
+            }
 
-            // FamilyInstance.LevelId
-            if (e is FamilyInstance fi)
-                return fi.LevelId;
+            // 2) 無 Waypoints，就往「另一端元素」的幾何中心推一個點
+            var otherId = isStart ? task.EndElementId : task.StartElementId;
+            var otherEl = _doc.GetElement(new ElementId(otherId))
+                         ?? throw new InvalidOperationException(
+                             $"ComputeTargetPoint 失敗：找不到另一端元素 (ElementId={otherId})");
 
-            // MEP curve / tray reference level
-            if (e is MEPCurve mep)
-                return mep.ReferenceLevel?.Id;
-
-            // 通用 Level 參數
-            var p = e.get_Parameter(BuiltInParameter.FAMILY_LEVEL_PARAM)
-                    ?? e.get_Parameter(BuiltInParameter.RBS_START_LEVEL_PARAM)
-                    ?? e.get_Parameter(BuiltInParameter.RBS_END_LEVEL_PARAM);
-            if (p != null && p.HasValue)
-                return p.AsElementId();
-
-            return null;
+            return GetCenterOfElement(otherEl);
         }
 
-        private static XYZ GetRepresentativePoint(Element e)
+        // ---------------------------------------------------------------------
+        // 小工具
+        // ---------------------------------------------------------------------
+        private static HostKind ClassifyHost(Element e)
         {
-            if (e?.Location is LocationPoint lp) return lp.Point;
-            if (e?.Location is LocationCurve lc) return lc.Curve?.Evaluate(0.5, true) ?? XYZ.Zero;
+            if (e is CableTray) return HostKind.CableTray;
+            if (e is Conduit) return HostKind.Conduit;
+            if (e is FamilyInstance) return HostKind.FamilyInstance;
+            return HostKind.Other;
+        }
+
+        private static XYZ GetCenterOfElement(Element e)
+        {
+            if (e?.Location is LocationPoint lp)
+                return lp.Point;
+
+            if (e?.Location is LocationCurve lc)
+                return lc.Curve?.Evaluate(0.5, true) ?? XYZ.Zero;
+
             var bb = e?.get_BoundingBox(null);
-            return (bb != null) ? (bb.Min + bb.Max) * 0.5 : XYZ.Zero;
+            if (bb != null)
+                return (bb.Min + bb.Max) * 0.5;
+
+            return XYZ.Zero;
         }
 
-        private static bool IsZeroLength(this XYZ v)
+        private static void SetConduitDiameter(Conduit conduit, double diameterFt)
         {
-            return v == null || v.GetLength() < 1e-6;
+            if (conduit == null) return;
+
+            // Revit 內部單位為 ft，直接用 BuiltInParameter.RBS_CONDUIT_DIAMETER_PARAM
+            var param = conduit.get_Parameter(BuiltInParameter.RBS_CONDUIT_DIAMETER_PARAM);
+            if (param != null && !param.IsReadOnly)
+            {
+                param.Set(diameterFt);
+            }
         }
     }
 }

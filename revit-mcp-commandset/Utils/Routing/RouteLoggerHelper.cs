@@ -17,7 +17,7 @@ namespace RevitMCPCommandSet.Utils.Routing
             var wp = (t.Waypoints == null || t.Waypoints.Count == 0)
                 ? "[]"
                 : string.Join(";", t.Waypoints.Select(p => $"({p.X:F1},{p.Y:F1},{p.Z:F1})"));
-            return $"Start={t.StartElementId}, End={t.EndElementId}, Waypoints={wp}, MinLen={t.MinSegmentLength_mm}mm, Pref={t.RoutingPreference}";
+            return $"Start={t.StartElementId}, End={t.EndElementId}, Waypoints={wp}, MinLen={t.MinSegmentLengthMm}mm, Pref={t.RoutingPreference}";
         }
 
         public static string DescribeElement(Element e)

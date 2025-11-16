@@ -33,9 +33,9 @@ namespace RevitMCPCommandSet.Services.Routing
         {
             _logger.Info($"[InferCtx][IN] S={s?.Id}, E={e?.Id}, Override?={(task?.Override != null)}");
             var ctx = new RoutingContext { 
-                Tolerance_ft = task.Tolerance_mm / 304.8, 
-                MinSegmentLength_ft = task.MinSegmentLength_mm / 304.8,
-                Tolerance_deg = task.Tolerance_deg};
+                Tolerance_ft = task.ToleranceMm / 304.8, 
+                MinSegmentLength_ft = task.MinSegmentLengthMm / 304.8,
+                Tolerance_deg = task.ToleranceDeg};
 
             try
             {
@@ -75,7 +75,7 @@ namespace RevitMCPCommandSet.Services.Routing
                     if (task.Override.PipeTypeId.HasValue) ctx.PipeTypeId = new ElementId(task.Override.PipeTypeId.Value);
                     if (task.Override.SystemTypeId.HasValue) ctx.SystemTypeId = new ElementId(task.Override.SystemTypeId.Value);
                     if (task.Override.LevelId.HasValue) ctx.LevelId = new ElementId(task.Override.LevelId.Value);
-                    if (task.Override.Diameter_mm.HasValue) ctx.Diameter_ft = task.Override.Diameter_mm.Value / 304.8;
+                    if (task.Override.DiameterMm.HasValue) ctx.Diameter_ft = task.Override.DiameterMm.Value / 304.8;
                 }
 
                 if (ctx.PipeTypeId == null || ctx.SystemTypeId == null || ctx.LevelId == null)

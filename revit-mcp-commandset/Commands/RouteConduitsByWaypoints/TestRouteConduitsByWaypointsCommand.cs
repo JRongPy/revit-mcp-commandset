@@ -36,7 +36,8 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
                 var task = new ConduitRouteTask
                 {
                     StartElementId = tray.Id.IntegerValue,
-                    EndElementId = endpoint.Id.IntegerValue
+                    EndElementId = endpoint.Id.IntegerValue,
+                    ConduitDiameterMm = 53,
                 };
 
                 // 3) 直接呼叫 handler（內含 Transaction）

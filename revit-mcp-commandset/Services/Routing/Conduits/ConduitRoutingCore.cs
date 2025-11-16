@@ -31,7 +31,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
             logger.Info($"[Task] StartElementId={task.StartElementId}, EndElementId={task.EndElementId}");
 
             var startEle = doc.GetElement(new ElementId(task.StartElementId));
-            var endEle = doc.GetElement(new ElementId(task.EndElementId));
+            var endEle = doc.GetElement(new ElementId(task.EndElementId));   
 
             if (startEle == null)
                 throw new InvalidOperationException($"StartElementId={task.StartElementId} 找不到對應元素。");
@@ -41,15 +41,16 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
             logger.Info($"Start Element: {RouteLoggerHelper.DescribeElement(startEle)}");
             logger.Info($"End   Element: {RouteLoggerHelper.DescribeElement(endEle)}");
 
+            var ctx = ConduitRoutingServices.InferRoutingContext(doc, startEle, endEle, task);
+
             var created = new List<ElementId>();
 
             // 1) 從 tray 端長出第一段 Conduit anchor
-            var trayAnchor = ConduitAnchorResolver.CreateTrayAnchor(doc, startEle, endEle, logger);
-            created.Add(trayAnchor.AnchorConduit.Id);
-
-            // 2) 從 endpoint 端也長出一段 Conduit anchor（暫時不做對接，只是 anchor stub）
-            var endpointAnchor = ConduitAnchorResolver.CreateEndpointAnchor(doc, startEle, endEle, logger);
-            created.Add(endpointAnchor.AnchorConduit.Id);
+            
+            var startAnchor = new ConduitRoutingAnchor(doc, startEle, task, true, ctx);
+            var endAnchor = new ConduitRoutingAnchor(doc, endEle, task, false, ctx);
+            created.Add(startAnchor.AnchorElement.Id);
+            created.Add(endAnchor.AnchorElement.Id);
 
             logger.Info($"[SUCCESS] Created {created.Count} conduit anchor(s): {string.Join(", ", created)}");
             logger.Info("===== ConduitRoutingCore - EXECUTION END =====");

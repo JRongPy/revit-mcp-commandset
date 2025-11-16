@@ -92,6 +92,8 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
         /// </summary>
         public ConduitRouteOverrideOptions Override { get; set; }
 
+        public double ConduitDiameterMm { get; set; } = 53.0;
+
         public override string ToString()
         {
             return $"ConduitRouteTask(Start={StartElementId}, End={EndElementId}, Waypoints={Waypoints?.Count ?? 0}, MinLenMm={MinSegmentLengthMm}, TrayOffsetMm={TrayOffsetMm})";

@@ -8,10 +8,10 @@ namespace RevitMCPCommandSet.Services.Routing
         public int StartElementId { get; set; }
         public int EndElementId { get; set; }
         public List<JZPoint> Waypoints { get; set; } = new List<JZPoint>();
-        public double MinSegmentLength_mm { get; set; } = 100;
+        public double MinSegmentLengthMm { get; set; } = 100;
         public string RoutingPreference { get; set; } = "Tee"; // or Takeoff
-        public double Tolerance_mm { get; set; } = 10;
-        public double Tolerance_deg { get; set; } = 5.0;
+        public double ToleranceMm { get; set; } = 10;
+        public double ToleranceDeg { get; set; } = 5.0;
         public OverrideDTO Override { get; set; }
 
         public class OverrideDTO
@@ -19,7 +19,7 @@ namespace RevitMCPCommandSet.Services.Routing
             public int? SystemTypeId { get; set; }
             public int? PipeTypeId { get; set; }
             public int? LevelId { get; set; }
-            public double? Diameter_mm { get; set; }
+            public double? DiameterMm { get; set; }
         }
     }
 }

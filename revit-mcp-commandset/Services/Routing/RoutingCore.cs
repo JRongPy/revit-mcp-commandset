@@ -79,7 +79,7 @@ namespace RevitMCPCommandSet.Services.Routing
             if (endAnchor.CreatedElementIds.Count > 0) created.AddRange(endAnchor.CreatedElementIds);
 
             var path = BuildPathWorldPoints(startAnchor.AnchorPoint, task.Waypoints, endAnchor.AnchorPoint);
-            path = NormalizePathPoints(path, ctx.Tolerance_ft, task.Tolerance_deg);
+            path = NormalizePathPoints(path, ctx.Tolerance_ft, task.ToleranceDeg);
             logger.Info($"[BuildPath][Final] {string.Join(" -> ", path.Select(Pt))}");
 
             if (path.Count == 1)
@@ -98,7 +98,7 @@ namespace RevitMCPCommandSet.Services.Routing
             {
                 var segId = SegmentBuilder.CreatePipeSegmentAlignedOrBent(
                     doc, ctx, startAnchor.AnchorConnector, path[0], path[1],
-                    task.MinSegmentLength_mm / 304.8, task.Tolerance_mm / 304.8, created
+                    task.MinSegmentLengthMm / 304.8, task.ToleranceMm / 304.8, created
                 );
                 Pipe pipe = doc.GetElement(segId) as Pipe;
                 PipeUtils.TryCreateElbow(doc, pipe, endAnchor.AnchorElement as Pipe, endAnchor.AnchorPoint);
@@ -108,7 +108,7 @@ namespace RevitMCPCommandSet.Services.Routing
             {
                 var segCreated = CreateSegmentsAndFittings(
                     doc, ctx, startAnchor, endAnchor, path,
-                    task.MinSegmentLength_mm / 304.8, task.RoutingPreference, task.Tolerance_mm / 304.8
+                    task.MinSegmentLengthMm / 304.8, task.RoutingPreference, task.ToleranceMm / 304.8
                 );
                 created.AddRange(segCreated);
             }
