@@ -46,7 +46,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
         // 這裡直接沿用 RoutingContext，PipeTypeId 當作 ConduitTypeId
         public ElementId ConduitTypeId { get; }
         public ElementId LevelId { get; }
-        public double Diameter_ft { get; }
+        public double DiameterFt { get; }
 
         private readonly Document _doc;
         private readonly ConduitRoutingContext _ctx;
@@ -54,7 +54,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
 
         private readonly double _tol_ft;
         private readonly double _tol_deg;
-        private readonly double _minSegLen_ft;
+        private readonly double _minSegLenFt;
 
         public ConduitRoutingAnchor(
             Document doc,
@@ -72,11 +72,11 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
 
             ConduitTypeId = ctx.ConduitTypeId;   // 先共用 PipeTypeId 當 conduit type
             LevelId = ctx.LevelId;
-            Diameter_ft = ctx.DiameterFt / 304.8;
+            DiameterFt = ctx.DiameterFt / 304.8;
 
             _tol_ft = Math.Max(ctx.ToleranceFt, 1e-4);
             _tol_deg = task.ToleranceDeg;
-            _minSegLen_ft = task.MinSegmentLengthMm / 304.8;
+            _minSegLenFt = task.MinSegmentLengthMm / 304.8;
 
             BuildAnchorElement(isStart);
         }
@@ -153,28 +153,23 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
             var proj = crv.Project(targetPoint);
             var pOnTray = proj?.XYZPoint ?? GetCenterOfElement(tray);
 
+            // 取得 tray 的 connector X 作為延伸方向
+            XYZ xDir = tray.ConnectorManager.Lookup(0)?.CoordinateSystem?.BasisX;
+
             // 往目標方向拉出一段 stub conduit
             var toTarget = targetPoint - pOnTray;
-            XYZ dir;
 
-            if (toTarget.IsZeroLength())
-            {
-                // 如果目標點剛好壓在 tray 上，就用 tray 曲線方向當方向
-                if (crv is Line line)
-                    dir = (line.Direction).Normalize();
-                else
-                    dir = XYZ.BasisY;
-            }
-            else
-            {
-                dir = toTarget.Normalize();
-            }
+            // 判斷方向：tray X 跟目標點方向，如果不一致則反向
+            XYZ dir = xDir.DotProduct(toTarget) >= 0
+                ? xDir.Normalize()
+                : -xDir.Normalize();
+            double trayWidth = tray.Width;
 
-            var pStart = pOnTray;
-            var pEnd = pStart + dir * _minSegLen_ft;
+            var pStart = pOnTray + dir* trayWidth / 2; // 從tray邊緣生成
+            var pEnd = pStart + dir * _minSegLenFt;
 
             var conduit = Conduit.Create(_doc, ConduitTypeId, pStart, pEnd, LevelId);
-            SetConduitDiameter(conduit, Diameter_ft);
+            SetConduitDiameter(conduit, DiameterFt);
             CreatedElementIds.Add(conduit.Id);
 
             AnchorElement = conduit;
@@ -241,18 +236,18 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
             if (aligned)
             {
                 var len = origin.DistanceTo(targetPoint);
-                pEnd = (len < _minSegLen_ft)
-                    ? origin + connDir * _minSegLen_ft
+                pEnd = (len < _minSegLenFt)
+                    ? origin + connDir * _minSegLenFt
                     : targetPoint;
             }
             else
             {
                 // 不同向 → 先沿 connector 方向拉出一段最小長度，之後再交給路由器轉折
-                pEnd = origin + connDir * _minSegLen_ft;
+                pEnd = origin + connDir * _minSegLenFt;
             }
 
             var conduit = Conduit.Create(_doc, ConduitTypeId, pStart, pEnd, LevelId);
-            SetConduitDiameter(conduit, Diameter_ft);
+            SetConduitDiameter(conduit, DiameterFt);
             CreatedElementIds.Add(conduit.Id);
 
             AnchorElement = conduit;
