@@ -11,7 +11,7 @@ namespace RevitMCPCommandSet.Utils.Routing
     {
         // =============== 日誌輔助 =======================
 
-        public static string  SerializeTask(RouteTask t)
+        public static string  SerializeTask(RouteTaskInfo t)
         {
             if (t == null) return "null";
             var wp = (t.Waypoints == null || t.Waypoints.Count == 0)

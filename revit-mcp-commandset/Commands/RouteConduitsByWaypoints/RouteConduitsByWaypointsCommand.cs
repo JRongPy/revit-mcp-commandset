@@ -46,7 +46,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
                 var tasksToken = parameters["tasks"];
                 if (tasksToken != null && tasksToken.Type == JTokenType.Array)
                 {
-                    var tasks = tasksToken.ToObject<List<ConduitRouteTask>>() ?? new List<ConduitRouteTask>();
+                    var tasks = tasksToken.ToObject<List<ConduitRouteTaskInfo>>() ?? new List<ConduitRouteTaskInfo>();
                     if (tasks.Count == 0) throw new ArgumentException("參數 tasks 為空，請提供至少一筆任務。");
 
                     _handler.SetTasks(tasks);
@@ -72,7 +72,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
                 if (taskToken == null || taskToken.Type == JTokenType.Null)
                     throw new ArgumentNullException(nameof(parameters), "請提供 task 或 tasks。");
 
-                var task = taskToken.ToObject<ConduitRouteTask>();
+                var task = taskToken.ToObject<ConduitRouteTaskInfo>();
                 if (task == null) throw new ArgumentNullException(nameof(task), "AI 傳入的 task 內容為空或格式不正確。");
 
                 _handler.SetTask(task);

@@ -50,7 +50,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
 
         private readonly Document _doc;
         private readonly ConduitRoutingContext _ctx;
-        private readonly ConduitRouteTask _task;
+        private readonly ConduitRouteTaskInfo _task;
 
         private readonly double _tol_ft;
         private readonly double _tol_deg;
@@ -59,7 +59,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
         public ConduitRoutingAnchor(
             Document doc,
             Element host,
-            ConduitRouteTask task,
+            ConduitRouteTaskInfo task,
             bool isStart,
             ConduitRoutingContext ctx)
         {
@@ -72,11 +72,11 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
 
             ConduitTypeId = ctx.ConduitTypeId;   // 先共用 PipeTypeId 當 conduit type
             LevelId = ctx.LevelId;
-            DiameterFt = ctx.DiameterFt / 304.8;
+            DiameterFt = ctx.DiameterFt;
 
             _tol_ft = Math.Max(ctx.ToleranceFt, 1e-4);
-            _tol_deg = task.ToleranceDeg;
-            _minSegLenFt = task.MinSegmentLengthMm / 304.8;
+            _tol_deg = ctx.ToleranceDeg;
+            _minSegLenFt = ctx.MinSegmentLengthFt;
 
             BuildAnchorElement(isStart);
         }
@@ -153,23 +153,64 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
             var proj = crv.Project(targetPoint);
             var pOnTray = proj?.XYZPoint ?? GetCenterOfElement(tray);
 
-            // 取得 tray 的 connector X 作為延伸方向
-            XYZ xDir = tray.ConnectorManager.Lookup(0)?.CoordinateSystem?.BasisX;
+            // 取得 tray 的 X 方向作為「從托盤側邊伸出」的基準方向
+            var xConn = tray.ConnectorManager?.Lookup(0);
+            XYZ xDir = xConn?.CoordinateSystem?.BasisX;
+            if (xDir == null || xDir.IsZeroLength())
+                xDir = XYZ.BasisX; // fallback，理論上不太會用到
 
-            // 往目標方向拉出一段 stub conduit
-            var toTarget = targetPoint - pOnTray;
+            // 目標相對方向（tray 中心線 → target）
+            var toTargetFromCenter = targetPoint - pOnTray;
+            if (toTargetFromCenter.IsZeroLength())
+            {
+                // 若靠得太近，就先假設往 X 方向拉
+                toTargetFromCenter = xDir;
+            }
 
-            // 判斷方向：tray X 跟目標點方向，如果不一致則反向
-            XYZ dir = xDir.DotProduct(toTarget) >= 0
-                ? xDir.Normalize()
-                : -xDir.Normalize();
+            // 判斷 xDir 跟目標方向的正反向
+            xDir = xDir.Normalize();
+            XYZ baseDir = (xDir.DotProduct(toTargetFromCenter) >= 0)
+                ? xDir
+                : xDir.Negate();   // 避免往「背對 target」的方向長
+
             double trayWidth = tray.Width;
 
-            var pStart = pOnTray + dir* trayWidth / 2; // 從tray邊緣生成
-            var pEnd = pStart + dir * _minSegLenFt;
+            // 從 tray 邊緣當作 conduit 起點
+            var pStart = pOnTray + baseDir * (trayWidth / 2.0);
+
+            // ===== 比照 FamilyInstance 的邏輯 =====
+            // 若 baseDir 與 (targetPoint - pStart) 方向一致，就直接拉到 targetPoint（至少 _minSegLenFt）
+            // 否則只拉出一段最小長度 stub，之後交給路由器再轉折
+            var toTargetFromStart = targetPoint - pStart;
+            if (toTargetFromStart.IsZeroLength())
+            {
+                // targetPoint 剛好落在 tray 邊緣附近，先往 baseDir 拉一段
+                toTargetFromStart = baseDir;
+            }
+
+            var tgtDir = toTargetFromStart.Normalize();
+
+            double dot = baseDir.DotProduct(tgtDir);
+            double cosTol = Math.Cos(_tol_deg * Math.PI / 180.0);
+            bool aligned = dot >= cosTol;
+
+            XYZ pEnd;
+            if (aligned)
+            {
+                // 方向一致：直接拉到 targetPoint，但長度至少 _minSegLenFt
+                double len = pStart.DistanceTo(targetPoint);
+                pEnd = (len < _minSegLenFt)
+                    ? pStart + baseDir * _minSegLenFt
+                    : targetPoint;
+            }
+            else
+            {
+                // 方向不一致：只沿 baseDir 拉出一段最小長度，後續再轉折
+                pEnd = pStart + baseDir * _minSegLenFt;
+            }
 
             var conduit = Conduit.Create(_doc, ConduitTypeId, pStart, pEnd, LevelId);
-            SetConduitDiameter(conduit, DiameterFt);
+            ConduitUtils.SetConduitDiameter(conduit, DiameterFt);    // 或改成 ConduitUtils.SetConduitDiameter(...)
             CreatedElementIds.Add(conduit.Id);
 
             AnchorElement = conduit;
@@ -177,6 +218,9 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
                 .GetConnectors(conduit)
                 .OrderBy(c => c.Origin.DistanceTo(targetPoint))
                 .FirstOrDefault();
+
+            if (AnchorConnector == null)
+                throw new InvalidOperationException("ResolveOnTray 失敗：無法取得 stub conduit 的 Connector");
         }
 
         // ---------------------------------------------------------------------
@@ -247,7 +291,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
             }
 
             var conduit = Conduit.Create(_doc, ConduitTypeId, pStart, pEnd, LevelId);
-            SetConduitDiameter(conduit, DiameterFt);
+            ConduitUtils.SetConduitDiameter(conduit, DiameterFt);
             CreatedElementIds.Add(conduit.Id);
 
             AnchorElement = conduit;
@@ -264,7 +308,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
         // 目標點推導：先走 Waypoints，沒有時用「另一端元素中心」
         // （這邊先做簡版，之後要像 RoutingAnchor 那麼完整再一起升級）
         // ---------------------------------------------------------------------
-        private XYZ ComputeTargetPoint(ConduitRouteTask task, bool isStart)
+        private XYZ ComputeTargetPoint(ConduitRouteTaskInfo task, bool isStart)
         {
             // 1) 有 Waypoints 時：
             if (task?.Waypoints != null && task.Waypoints.Count > 0)
@@ -306,18 +350,6 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
                 return (bb.Min + bb.Max) * 0.5;
 
             return XYZ.Zero;
-        }
-
-        private static void SetConduitDiameter(Conduit conduit, double diameterFt)
-        {
-            if (conduit == null) return;
-
-            // Revit 內部單位為 ft，直接用 BuiltInParameter.RBS_CONDUIT_DIAMETER_PARAM
-            var param = conduit.get_Parameter(BuiltInParameter.RBS_CONDUIT_DIAMETER_PARAM);
-            if (param != null && !param.IsReadOnly)
-            {
-                param.Set(diameterFt);
-            }
         }
     }
 }

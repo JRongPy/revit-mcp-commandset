@@ -3,7 +3,7 @@ using RevitMCPCommandSet.Models.Common;
 
 namespace RevitMCPCommandSet.Services.Routing
 {
-    public class RouteTask
+    public class RouteTaskInfo
     {
         public int StartElementId { get; set; }
         public int EndElementId { get; set; }

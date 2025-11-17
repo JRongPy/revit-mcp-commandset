@@ -21,12 +21,12 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
     {
         private UIApplication _uiApp;
 
-        private List<ConduitRouteTask> _batchTasks;
-        private ConduitRouteTask _task;
+        private List<ConduitRouteTaskInfo> _batchTasks;
+        private ConduitRouteTaskInfo _task;
 
         public class BatchConduitRouteResult
         {
-            public ConduitRouteTask Task { get; set; }
+            public ConduitRouteTaskInfo Task { get; set; }
             public bool Success { get; set; }
             public string Message { get; set; }
             public List<int> CreatedElementIds { get; set; } = new();
@@ -48,14 +48,14 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
             catch { /* ignore */ }
         }
 
-        public void SetTasks(List<ConduitRouteTask> tasks)
+        public void SetTasks(List<ConduitRouteTaskInfo> tasks)
         {
-            _batchTasks = tasks ?? new List<ConduitRouteTask>();
+            _batchTasks = tasks ?? new List<ConduitRouteTaskInfo>();
             _task = null;
             _reset.Reset();
         }
 
-        public void SetTask(ConduitRouteTask task)
+        public void SetTask(ConduitRouteTaskInfo task)
         {
             _task = task;
             _batchTasks = null;
@@ -110,7 +110,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
             }
         }
 
-        private List<ElementId> ExecuteSingleWithTx(Document doc, ConduitRouteTask task, ILogger logger)
+        private List<ElementId> ExecuteSingleWithTx(Document doc, ConduitRouteTaskInfo task, ILogger logger)
         {
             if (task == null)
                 return new List<ElementId>();
@@ -139,7 +139,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
 
         private List<BatchConduitRouteResult> ExecuteBatchWithTx(
              Document doc,
-             List<ConduitRouteTask> tasks,
+             List<ConduitRouteTaskInfo> tasks,
              ILogger logger)
         {
             var results = new List<BatchConduitRouteResult>();

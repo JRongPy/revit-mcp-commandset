@@ -19,12 +19,12 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
     {
         private UIApplication _uiApp;
 
-        private List<RouteTask> _batchTasks;   // 批次任務（可為 null 表示單筆）
+        private List<RouteTaskInfo> _batchTasks;   // 批次任務（可為 null 表示單筆）
         public AIResult<List<BatchRouteResult>> BatchResult { get; private set; } // 批次回傳
 
         public class BatchRouteResult
         {
-            public RouteTask Task { get; set; }
+            public RouteTaskInfo Task { get; set; }
             public bool Success { get; set; }
             public string Message { get; set; }
             public List<int> CreatedElementIds { get; set; } = new();
@@ -32,7 +32,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
 
         private readonly ManualResetEvent _reset = new(false);
         public AIResult<List<int>> Result { get; private set; }
-        private RouteTask _task;
+        private RouteTaskInfo _task;
 
         private ILogger _logger;
 
@@ -45,14 +45,14 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
             catch { /* ignore permission errors */ }
         }
 
-        public void SetTasks(List<RouteTask> tasks)
+        public void SetTasks(List<RouteTaskInfo> tasks)
         {
-            _batchTasks = tasks ?? new List<RouteTask>();
+            _batchTasks = tasks ?? new List<RouteTaskInfo>();
             _task = null; // 避免混用
             _reset.Reset();
         }
 
-        public void SetTask(RouteTask task)
+        public void SetTask(RouteTaskInfo task)
         {
             _task = task;
             _reset.Reset();
@@ -112,7 +112,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
 
 
         // 單筆：包交易 → 呼叫 RoutingCore 核心
-        private List<ElementId> ExecuteSingleWithTx(Document doc, RouteTask task, ILogger logger)
+        private List<ElementId> ExecuteSingleWithTx(Document doc, RouteTaskInfo task, ILogger logger)
         {
             if (doc.IsModifiable)
             {
@@ -139,11 +139,11 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
         }
 
         // 批次：逐筆包交易（每筆各自成功/失敗；最彈性）
-        private List<BatchRouteResult> ExecuteBatchWithTx(Document doc, IEnumerable<RouteTask> tasks, ILogger logger)
+        private List<BatchRouteResult> ExecuteBatchWithTx(Document doc, IEnumerable<RouteTaskInfo> tasks, ILogger logger)
         {
             var results = new List<BatchRouteResult>();
             logger.Info(GetName() + " - Batch Execution Start");    
-            foreach (var t in tasks ?? Enumerable.Empty<RouteTask>())
+            foreach (var t in tasks ?? Enumerable.Empty<RouteTaskInfo>())
             {
                 try
                 {

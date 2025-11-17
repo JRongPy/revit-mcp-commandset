@@ -42,9 +42,9 @@ namespace RevitMCPCommandSet.Services.Routing
         private readonly double _tol_deg;
         private readonly string _routingPref;
         private readonly double _minSegLen_ft; // 最小管段長度（英尺）
-        private readonly RouteTask _task;
+        private readonly RouteTaskInfo _task;
 
-        public RoutingAnchor(Document doc, Element host, RouteTask task, bool isStart, RoutingContext ctx)
+        public RoutingAnchor(Document doc, Element host, RouteTaskInfo task, bool isStart, RoutingContext ctx)
         {
             _doc = doc ?? throw new ArgumentNullException(nameof(doc));
             _ctx = ctx ?? throw new ArgumentNullException(nameof(ctx));
@@ -296,7 +296,7 @@ namespace RevitMCPCommandSet.Services.Routing
         ///    - 從「另一端元素」推導一個候選點（Pipe: 自身中心投影到對方曲線；FI: 對方最近 Connector）
         ///    - 若候選點在 HostElement 上→丟例外（無下一個可退）。
         /// </summary>
-        private XYZ ComputeTargetPoint(RouteTask task, bool isStart)
+        private XYZ ComputeTargetPoint(RouteTaskInfo task, bool isStart)
         {
             // 1) 有 Waypoints：由近端往外掃描，挑不在 Host 上的第一個
             if (task?.Waypoints != null && task.Waypoints.Count > 0)

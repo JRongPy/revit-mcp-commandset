@@ -12,7 +12,7 @@ namespace RevitMCPCommandSet.Services.Routing
 {
     public static class RoutingServices
     {
-       private static readonly Logger _logger = new Logger();
+        private static readonly Logger _logger = new Logger();
         public static string Pt(XYZ p) => p == null ? "null" : $"({p.X:F3},{p.Y:F3},{p.Z:F3})";
 
         // ================= 型別定義 ========================
@@ -29,7 +29,7 @@ namespace RevitMCPCommandSet.Services.Routing
         }
 
         // --- Step3: 推斷/取得必要資訊
-        public static RoutingContext InferRoutingContext(Document doc, Element s, Element e, RouteTask task)
+        public static RoutingContext InferRoutingContext(Document doc, Element s, Element e, RouteTaskInfo task)
         {
             _logger.Info($"[InferCtx][IN] S={s?.Id}, E={e?.Id}, Override?={(task?.Override != null)}");
             var ctx = new RoutingContext { 

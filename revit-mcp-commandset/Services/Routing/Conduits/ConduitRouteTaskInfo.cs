@@ -5,26 +5,11 @@ using RevitMCPCommandSet.Models.Common;
 namespace RevitMCPCommandSet.Services.Routing.Conduits
 {
     /// <summary>
-    /// Conduit anchor 使用的類型標記：
-    /// - Tray：起點為 CableTray
-    /// - Endpoint：終點為 panel / box / 其他 Family / 既有 conduit
-    /// - Conduit：未來如果從既有 conduit 分支，可以用這個類型
-    /// </summary>
-    public enum ConduitAnchorKind
-    {
-        Tray,
-        Endpoint,
-        Conduit
-    }
-
-    /// <summary>
     /// 覆寫 Conduit Routing 相關設定（可選）
     /// 之後如果要支援 AI / UI 指定 type / level / size，就用這個區塊。
     /// </summary>
     public class ConduitRouteOverrideOptions
     {
-        /// <summary>覆寫用的 ElectricalSystemType.Id.IntegerValue（可選）</summary>
-        public int? SystemTypeId { get; set; }
 
         /// <summary>覆寫用的 ConduitType.Id.IntegerValue（可選）</summary>
         public int? ConduitTypeId { get; set; }
@@ -37,7 +22,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
 
         public override string ToString()
         {
-            return $"Override(SystemType={SystemTypeId}, ConduitType={ConduitTypeId}, Level={LevelId}, DiaMm={DiameterMm})";
+            return $"Override(ConduitType={ConduitTypeId}, Level={LevelId}, DiaMm={DiameterMm})";
         }
     }
 
@@ -48,7 +33,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
     /// - EndElementId
     /// 其他欄位先預留未來路徑規劃（waypoints / offset / tolerance）。
     /// </summary>
-    public class ConduitRouteTask
+    public class ConduitRouteTaskInfo
     {
         /// <summary>
         /// 起點元素 Id（通常是 CableTray.Id.IntegerValue）。
@@ -96,7 +81,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
 
         public override string ToString()
         {
-            return $"ConduitRouteTask(Start={StartElementId}, End={EndElementId}, Waypoints={Waypoints?.Count ?? 0}, MinLenMm={MinSegmentLengthMm}, TrayOffsetMm={TrayOffsetMm})";
+            return $"ConduitRouteTask(Start={StartElementId}, End={EndElementId}, Waypoints={Waypoints?.Count ?? 0},ConduitDiameterMm={ConduitDiameterMm} ,MinLenMm={MinSegmentLengthMm}, TrayOffsetMm={TrayOffsetMm})";
         }
     }
 }

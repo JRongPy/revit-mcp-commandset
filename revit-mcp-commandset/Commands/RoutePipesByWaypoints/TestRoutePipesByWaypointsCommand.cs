@@ -33,7 +33,7 @@ namespace RevitMCPCommandSet.Commands.RoutePipesByWaypoints
                 XYZ pEnd = GetRepresentativePoint(endEl);
 
                 // 2) 建立簡單的 RouteTask
-                var task = new RouteTask
+                var task = new RouteTaskInfo
                 {
                     StartElementId = startEl.Id.IntegerValue,
                     EndElementId = endEl.Id.IntegerValue,

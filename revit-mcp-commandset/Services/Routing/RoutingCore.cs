@@ -24,7 +24,7 @@ namespace RevitMCPCommandSet.Services.Routing
         /// <param name="logger"></param>
         /// <returns></returns>
         /// <exception cref="InvalidOperationException"></exception>
-        public static List<ElementId> RoutePipesTask(Document doc, RouteTask task, ILogger logger)
+        public static List<ElementId> RoutePipesTask(Document doc, RouteTaskInfo task, ILogger logger)
         {
             var created = new List<ElementId>();
             List<Element> unions = new(); // 若你後續還要清掉暫時接頭
@@ -42,8 +42,8 @@ namespace RevitMCPCommandSet.Services.Routing
 
             var startKind = Classify(startEle);
             var endKind = Classify(endEle);
-            if (startKind == ElementKind.FamilyInstance) ConnectorUtils.EnsureHasConnectors((FamilyInstance)startEle);
-            if (endKind == ElementKind.FamilyInstance) ConnectorUtils.EnsureHasConnectors((FamilyInstance)endEle);
+            if (startKind == ElementKind.FamilyInstance) ConnectorUtils.EnsureHasConnectors((FamilyInstance)startEle);   // 檢查有沒有Connector
+            if (endKind == ElementKind.FamilyInstance) ConnectorUtils.EnsureHasConnectors((FamilyInstance)endEle);    // 檢查有沒有Connector
 
             var ctx = InferRoutingContext(doc, startEle, endEle, task);
             logger.Info($"[CONTEXT] SystemTypeId={ctx.SystemTypeId}, PipeTypeId={ctx.PipeTypeId}, LevelId={ctx.LevelId}, Diameter={ctx.Diameter_ft * 304.8:F1} mm");
