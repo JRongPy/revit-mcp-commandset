@@ -120,17 +120,17 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
                 using (var sub = new SubTransaction(doc))
                 {
                     sub.Start();
-                    var created = ConduitRoutingCore.RouteConduitsFromTrayTask(doc, task, logger);
+                    var created = ConduitRoutingCore.RouteConduitsByWaypointsTask(doc, task, logger);
                     sub.Commit();
                     return created;
                 }
             }
             else
             {
-                using (var tx = new Transaction(doc, "Route conduits from tray"))
+                using (var tx = new Transaction(doc, "Route conduits by waypoints"))
                 {
                     tx.Start();
-                    var created = ConduitRoutingCore.RouteConduitsFromTrayTask(doc, task, logger);
+                    var created = ConduitRoutingCore.RouteConduitsByWaypointsTask(doc, task, logger);
                     tx.Commit();
                     return created;
                 }
@@ -144,7 +144,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
         {
             var results = new List<BatchConduitRouteResult>();
 
-            using (var tx = new Transaction(doc, "Route conduits from tray (Batch)"))
+            using (var tx = new Transaction(doc, "Route conduits by waypoints (Batch)"))
             {
                 tx.Start();
 
@@ -152,7 +152,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
                 {
                     try
                     {
-                        var created = ConduitRoutingCore.RouteConduitsFromTrayTask(doc, t, logger);
+                        var created = ConduitRoutingCore.RouteConduitsByWaypointsTask(doc, t, logger);
                         results.Add(new BatchConduitRouteResult
                         {
                             Task = t,
@@ -181,6 +181,6 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
         public bool WaitForCompletion(int timeoutMilliseconds = 120000)
             => _reset.WaitOne(timeoutMilliseconds);
 
-        public string GetName() => "Route Conduits From Tray";
+        public string GetName() => "Route Conduits By Waypoints";
     }
 }

@@ -19,7 +19,7 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
     /// </summary>
     public static class ConduitRoutingCore
     {
-        public static List<ElementId> RouteConduitsFromTrayTask(
+        public static List<ElementId> RouteConduitsByWaypointsTask(
             Document doc,
             ConduitRouteTaskInfo taskInfo,
             ILogger logger)

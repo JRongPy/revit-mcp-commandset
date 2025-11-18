@@ -15,7 +15,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
 {
     /// <summary>
     /// MCP 入口：
-    /// command_name = "route_conduits_from_tray"
+    /// command_name = "route_conduits_by_waypoints"
     /// 目前先支援最簡單版本：
     /// {
     ///   "startElementId": 123,
@@ -31,7 +31,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
         {
         }
 
-        public override string CommandName => "route_conduits_from_tray";
+        public override string CommandName => "route_conduits_by_waypoints";
 
         /// <summary>
         /// MCP 執行入口，args 由 LLM / Agent 傳入。
