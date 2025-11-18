@@ -27,7 +27,7 @@ namespace RevitMCPCommandSet.Commands.RouteConduitsByWaypoints
         private RouteConduitsByWaypointsEventHandler _handler => (RouteConduitsByWaypointsEventHandler)Handler;
 
         public RouteConduitsByWaypointsCommand(UIApplication uiApp)
-            : base(new RoutePipesByWaypointsEventHandler(), uiApp)
+            : base(new RouteConduitsByWaypointsEventHandler(), uiApp)
         {
         }
 
