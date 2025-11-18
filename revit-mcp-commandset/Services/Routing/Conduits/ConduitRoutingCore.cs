@@ -62,36 +62,27 @@ namespace RevitMCPCommandSet.Services.Routing.Conduits
             // 3) 處理 Waypoints
             if (taskInfo.Waypoints != null && taskInfo.Waypoints.Count > 0)
             {
-                // todo : 移除與起訖點一樣的waypoint
-                //  ConduitRoutingServices.RemoveNearEndpointsInPlace 尚未實作
-
-                /* 
-                var wpXYZ = task.Waypoints
+                // 移除與起訖點一樣的waypoint
+                var wpXYZ = taskInfo.Waypoints
                     .Select(p => JZPoint.ToXYZ(p))
                     .ToList();
                 var startPt = ConnectorUtils.GetNearConnector(startEle, wpXYZ.FirstOrDefault()).Origin;
                 var endPt = ConnectorUtils.GetNearConnector(startEle, wpXYZ.LastOrDefault()).Origin;
-                ConduitRoutingServices.RemoveNearEndpointsInPlace(wpXYZ, startPt, endPt, ctx.Tolerance_ft);
-                task.Waypoints = wpXYZ
+                ConduitRoutingServices.RemoveNearEndpointsInPlace(wpXYZ, startPt, endPt, ctx.ToleranceFt);
+                taskInfo.Waypoints = wpXYZ
                     .Select(p => new JZPoint(p.X * 304.8, p.Y * 304.8, p.Z * 304.8))
                     .ToList();
-                */
             }
 
-            // 4) 若沒 Waypoints，自動推論（你原本的行為）
+            // 4) 若沒 Waypoints，自動推論（沿用原本pipe的邏輯，尚未進行邏輯處理）
             if (taskInfo.Waypoints == null || taskInfo.Waypoints.Count == 0)
             {
-                // todo : 推論 waypoint
-                // ConduitRoutingServices.InferWaypointsIfEmpty 尚未實作
-                
-                /* 
+                // 推論 waypoint
                 var wp = ConduitRoutingServices.InferWaypointsIfEmpty(doc, startEle, endEle, ctx);
                 logger.Info($"[Waypoints] Inferred {wp.Count} waypoint(s).");
                 if (wp.Count == 0)
                     throw new InvalidOperationException("未提供路由途經點，且無法推論，請重新執行路由指令。");
-                task.Waypoints.AddRange(wp.Select(p => new JZPoint(p.X * 304.8, p.Y * 304.8, p.Z * 304.8)));
-                logger.Info($"[Waypoints] Inferred:newTask: {RouteLoggerHelper.SerializeTask(task)}");
-                */
+                taskInfo.Waypoints.AddRange(wp.Select(p => new JZPoint(p.X * 304.8, p.Y * 304.8, p.Z * 304.8)));
             }
 
             /// =========================
